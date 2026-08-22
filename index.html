@@ -1314,6 +1314,7 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
 
     const vLine = type.voucher_lines?.[0] || {};
     const combinedRawRows = [];   // 근거파일용
+    const rawColumnFormats = {};  // 원본 raw 시트의 컬럼별 숫자 서식 (날짜/퍼센트/금액)
     let firstRawTemplateBuffer = null; // raw data 통합 파일의 서식 베이스로 쓸 원본 하나
     const retailerResults = [];  // 바우처 라인용
 
@@ -1333,9 +1334,11 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
           const resp = await fetch(signed.signedUrl);
           const buf = await resp.arrayBuffer();
           if(!firstRawTemplateBuffer) firstRawTemplateBuffer = buf.slice(0); // raw data 통합 파일의 서식 템플릿으로 재사용
-          const wb = XLSX.read(buf, { type:'array' });
+          // cellDates: 날짜를 Date 객체로, cellStyles: 셀의 숫자 서식(z)까지 읽어옴
+          const wb = XLSX.read(buf, { type:'array', cellDates:true, cellStyles:true });
           if(!wb.SheetNames.includes('raw')) continue;
-          const rows = XLSX.utils.sheet_to_json(wb.Sheets['raw'], { header:1, defval:'' });
+          const rawSheetSrc = wb.Sheets['raw'];
+          const rows = XLSX.utils.sheet_to_json(rawSheetSrc, { header:1, defval:'', raw:true });
           // 헤더 행 탐색: '브랜드' 포함 행
           let headerIdx = -1;
           for(let i=0;i<rows.length;i++){
@@ -1346,10 +1349,29 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
           const brandCol = header.findIndex(c => String(c).includes('브랜드'));
           const amtCol = header.findIndex(c => /지원금|JLRK/i.test(String(c)));
           if(brandCol === -1 || amtCol === -1) continue;
+
+          // 원본에서 컬럼별 숫자 서식(날짜/퍼센트/금액)을 수집 — 통합본에 그대로 적용하기 위함
+          const srcRange = XLSX.utils.decode_range(rawSheetSrc['!ref']);
+          const cleanKey = (h, idx) => String(h || `col${idx}`).replace(/[\r\n\t]+/g,' ').replace(/\s+/g,' ').trim() || `col${idx}`;
+          for(let ci = 0; ci < header.length; ci++){
+            const key = cleanKey(header[ci], ci);
+            if(rawColumnFormats[key]) continue;
+            for(let ri = headerIdx + 1; ri <= Math.min(headerIdx + 30, srcRange.e.r); ri++){
+              const addr = XLSX.utils.encode_cell({ r: ri, c: srcRange.s.c + ci });
+              const cell = rawSheetSrc[addr];
+              if(cell && cell.z){ rawColumnFormats[key] = cell.z; break; }
+              if(cell && cell.t === 'd'){ rawColumnFormats[key] = 'yyyy-mm-dd'; break; }
+            }
+          }
+
           for(let i=headerIdx+1; i<rows.length; i++){
             const row = rows[i];
-            if(!row || row.every(c => c === '')) continue;
-            const brand = normalizeBrand(row[brandCol]);
+            if(!row) continue;
+            // 원본 raw는 엑셀 표(Table)라 빈 행이 표 범위에 대량 포함됨 —
+            // 브랜드 값이 없으면 실제 청구 라인이 아니므로 제외
+            const brandRaw = row[brandCol];
+            if(brandRaw === '' || brandRaw == null) continue;
+            const brand = normalizeBrand(brandRaw);
             const amt = parseFloat(String(row[amtCol]).replace(/,/g,''));
             if(!isNaN(amt)){
               if(brand === 'JG') jgSum += amt;
@@ -1357,9 +1379,12 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
               else unknownSum += amt;
             }
             // 근거파일용 원본 행 그대로 보존 + 리테일러 코드 태그
-            const tagged = {};
-            header.forEach((h, idx) => { tagged[h || `col${idx}`] = row[idx]; });
-            tagged['리테일러(시스템)'] = inv.retailers?.code || '';
+            // (헤더에 줄바꿈/제어문자가 있으면 보고용으로 지저분하므로 공백으로 정리)
+            const tagged = { '리테일러(시스템)': inv.retailers?.code || '' };
+            header.forEach((h, idx) => {
+              const key = String(h || `col${idx}`).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim() || `col${idx}`;
+              tagged[key] = row[idx];
+            });
             combinedRawRows.push(tagged);
           }
         } catch(e){ console.error('raw 파싱 실패', path, e); }
@@ -1475,14 +1500,54 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
     setProgress('근거파일(raw data 통합)을 만드는 중...');
     let rawBuffer;
     if(combinedRawRows.length > 0){
-      // SheetJS로 생성 — 순수 데이터 덤프라 ExcelJS보다 단순하고 손상 위험이 없음
-      const ws = XLSX.utils.json_to_sheet(combinedRawRows);
-      const cols = Object.keys(combinedRawRows[0]);
-      ws['!cols'] = cols.map(c => ({ wch: Math.max(12, Math.min(30, String(c).length * 2)) }));
+      // 값이 전혀 없는 컬럼(원본 여백 열 등)은 보고용 파일에서 제외
+      const allKeys = Object.keys(combinedRawRows[0]);
+      const keepKeys = allKeys.filter(k => combinedRawRows.some(r => r[k] !== '' && r[k] != null));
+      const cleanedRows = combinedRawRows.map(r => {
+        const o = {}; keepKeys.forEach(k => { o[k] = r[k]; }); return o;
+      });
+
+      const ws = XLSX.utils.json_to_sheet(cleanedRows, { cellDates:true });
+      const cols = keepKeys;
+      const range = XLSX.utils.decode_range(ws['!ref']);
+
+      // 컬럼별 서식 적용: 원본에서 "유형"(날짜/퍼센트/금액)만 판별하고,
+      // 실제 표시 서식은 보고용으로 읽기 쉬운 형태로 통일
+      cols.forEach((key, ci) => {
+        const srcFmt = rawColumnFormats[key] || '';
+        let z = null;
+        if(/[ymd]/i.test(srcFmt) && !/[#0]/.test(srcFmt.replace(/[ymdhs]/gi,''))) z = 'yyyy-mm-dd';
+        else if(srcFmt.includes('%')) z = '0.0%';
+        else if(/#|0/.test(srcFmt)) z = '#,##0';
+        if(!z){ // 원본 서식이 General 등으로 판별 안 되면 컬럼명으로 추론
+          if(/일자|날짜|일$|date/i.test(key)) z = 'yyyy-mm-dd';
+          else if(/율|비율|rate/i.test(key)) z = '0.0%';
+          else if(/금액|가$|가 |지원금|합계|amount|price/i.test(key)) z = '#,##0';
+        }
+        for(let ri = range.s.r + 1; ri <= range.e.r; ri++){
+          const addr = XLSX.utils.encode_cell({ r: ri, c: ci });
+          const cell = ws[addr];
+          if(!cell) continue;
+          if(cell.t === 'd'){ cell.z = 'yyyy-mm-dd'; }
+          else if(cell.t === 'n' && z){ cell.z = z; }
+        }
+      });
+
+      // 열 너비: 헤더와 실제 값 길이를 함께 고려
+      ws['!cols'] = cols.map((key, ci) => {
+        let maxLen = String(key).length;
+        for(let ri = range.s.r + 1; ri <= Math.min(range.s.r + 200, range.e.r); ri++){
+          const cell = ws[XLSX.utils.encode_cell({ r: ri, c: ci })];
+          if(cell && cell.v != null) maxLen = Math.max(maxLen, String(cell.v).length);
+        }
+        return { wch: Math.max(10, Math.min(32, maxLen + 2)) };
+      });
       ws['!freeze'] = { xSplit:0, ySplit:1 };
+      ws['!autofilter'] = { ref: ws['!ref'] };
+
       const rawWb2 = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(rawWb2, ws, 'raw_통합');
-      rawBuffer = XLSX.write(rawWb2, { bookType:'xlsx', type:'array' });
+      rawBuffer = XLSX.write(rawWb2, { bookType:'xlsx', type:'array', cellDates:true });
     } else {
       const ws = XLSX.utils.aoa_to_sheet([['원본 청구서에서 raw 시트를 찾지 못해 근거 데이터가 비어 있습니다.']]);
       const rawWb2 = XLSX.utils.book_new();
