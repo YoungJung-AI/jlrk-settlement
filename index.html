@@ -331,21 +331,79 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
-/* ============================================================
-   여기 두 값만 채워 넣으면 됩니다 (Supabase Project Settings → API)
-   ============================================================ */
 const SUPABASE_URL = "https://yomuvsquaewmfxhfcgao.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_FfntgS9kX9mVfW7E_sBA7A_l8VX5nDA";
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let myProfile = null;
+let myRetailer = null;      // { id, code, name }
+let myWorkshops = [];       // 내 리테일러 소속 지점들
 let retailers = [];
 let selectedRetailerIds = new Set();
 let editingTypeId = null;
 let activeTypes = [];
 let currentRoundId = null;
+
+/* ---------- 숫자 입력 천단위 콤마 ---------- */
+function formatAmountInput(el){
+  el.addEventListener('input', () => {
+    const raw = el.value.replace(/[^\d]/g, '');
+    el.value = raw ? Number(raw).toLocaleString('ko-KR') : '';
+  });
+}
+function readAmountInput(el){
+  const n = parseInt(el.value.replace(/[^\d]/g, ''), 10);
+  return isNaN(n) ? null : n;
+}
+
+/* ---------- 엑셀 청구서 파싱 ----------
+   Sheet1 형태(리테일러명/지점/합계 또는 Retailer/Workshop/JLRK Support 헤더)를 찾아
+   지점 라벨 ↔ 금액 쌍을 뽑아낸다. 요약/총합계 행은 건너뜀. */
+function normalizeLabel(s){
+  return String(s||'').replace(/[\s\-_/()]/g, '').toUpperCase();
+}
+
+function parseClaimWorkbook(arrayBuffer){
+  const wb = XLSX.read(arrayBuffer, { type:'array' });
+  const sheetName = wb.SheetNames.includes('Sheet1') ? 'Sheet1' : wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header:1, defval:'' });
+
+  let headerRowIdx = -1, workshopCol = -1, amountCol = -1;
+  for(let i=0; i<rows.length; i++){
+    const row = rows[i];
+    let wCol = row.findIndex(c => normalizeLabel(c) === 'WORKSHOP' || normalizeLabel(c) === '지점');
+    if(wCol === -1) continue;
+    // 같은 행에서 금액 컬럼 후보: 'JLRK','지원금','합계','SUPPORT','청구' 포함
+    let aCol = row.findIndex((c,idx) => idx !== wCol && /(JLRK|지원금|합계|SUPPORT|청구)/i.test(normalizeLabel(c)));
+    if(aCol === -1) continue;
+    headerRowIdx = i; workshopCol = wCol; amountCol = aCol;
+    break;
+  }
+  if(headerRowIdx === -1) return [];
+
+  const results = [];
+  for(let i = headerRowIdx+1; i<rows.length; i++){
+    const row = rows[i];
+    const label = row[workshopCol];
+    if(!label) continue;
+    const labelStr = String(label);
+    if(/요약|총합계|총 합계/.test(labelStr)) continue;
+    const amt = parseFloat(String(row[amountCol]).replace(/,/g,''));
+    if(isNaN(amt)) continue;
+    results.push({ label: labelStr, amount: amt });
+  }
+  return results;
+}
+
+function matchWorkshop(label){
+  const norm = normalizeLabel(label);
+  // 1순위: 지점 코드(workshops.code) 매칭, 2순위: 지점명(workshops.name) 매칭
+  return myWorkshops.find(w => normalizeLabel(w.code) === norm)
+      || myWorkshops.find(w => normalizeLabel(w.name) === norm);
+}
 
 const CLAIM_STATUS_LABEL = { NOT_SUBMITTED:'미제출', SUBMITTED:'제출됨', REJECTED:'반송', APPROVED:'승인', CANCELLED:'취소' };
 const ROUND_STATUS_LABEL = { DRAFT:'준비중', OPEN:'접수중', CLOSED:'검토중', CONFIRMED:'확정공지', INVOICED:'계산서접수', VOUCHERED:'완료', PUBLISHED:'공지됨', FINALIZED:'확정', ARCHIVED:'종료' };
@@ -387,8 +445,16 @@ async function enterApp(session){
     document.getElementById('brandSub').textContent = 'Settlement Portal · Retailer';
     app.classList.add('retailer-mode');
     document.getElementById('adminNav').style.display = 'none';
+    await loadMyRetailerContext(profile.retailer_id);
     switchView('retailer');
   }
+}
+
+async function loadMyRetailerContext(retailerId){
+  const { data: r } = await sb.from('retailers').select('id, code, name').eq('id', retailerId).single();
+  myRetailer = r || null;
+  const { data: ws } = await sb.from('workshops').select('id, code, name').eq('retailer_id', retailerId).eq('is_active', true);
+  myWorkshops = ws || [];
 }
 
 document.getElementById('loginBtn').addEventListener('click', async () => {
@@ -707,7 +773,8 @@ async function downloadFile(path){
 }
 
 /* ================================================================
-   리테일러 화면 (Phase 2)
+   리테일러 화면 (Phase 2) — 회차 단위로 그룹핑, 엑셀 1건 업로드 시
+   지점별 라인을 자동 인식해 각 청구 항목에 분배한다.
    ================================================================ */
 async function loadRetailerClaims(){
   const listEl = document.getElementById('retailerList');
@@ -715,65 +782,134 @@ async function loadRetailerClaims(){
   listEl.innerHTML = '';
 
   const { data: claims, error } = await sb.from('claims')
-    .select('*, rounds(period_label, status, claim_due_at, settlement_types(name, direction)), workshops(name)')
-    .order('created_at', { ascending:false });
+    .select('*, rounds(period_label, status, claim_due_at, settlement_types(name, direction)), workshops(name, code)')
+    .order('created_at', { ascending:true });
 
   if(error){ console.error(error); return; }
   const visible = (claims||[]).filter(c => c.rounds && c.rounds.status !== 'DRAFT');
   if(visible.length === 0){ emptyEl.style.display='block'; return; }
   emptyEl.style.display='none';
 
+  // round_id 별로 그룹핑
+  const groups = new Map();
   visible.forEach(c => {
+    if(!groups.has(c.round_id)) groups.set(c.round_id, []);
+    groups.get(c.round_id).push(c);
+  });
+
+  groups.forEach((items) => {
+    const round = items[0].rounds;
+    const editable = round.status === 'OPEN' && (!round.claim_due_at || new Date(round.claim_due_at) > new Date());
     const card = document.createElement('div');
     card.className = 'claim-card';
-    const editable = c.rounds.status === 'OPEN' && (!c.rounds.claim_due_at || new Date(c.rounds.claim_due_at) > new Date());
-    const label = c.workshops ? c.workshops.name : '법인 전체';
 
-    card.innerHTML = `
+    const dueStr = round.claim_due_at ? new Date(round.claim_due_at).toLocaleString('ko-KR') : '미설정';
+    let bodyHtml = `
       <div class="claim-head">
         <div>
-          <div class="claim-name">${c.rounds.settlement_types?.name || ''} · ${c.rounds.period_label}</div>
-          <div class="claim-sub">${label} · 마감 ${c.rounds.claim_due_at ? new Date(c.rounds.claim_due_at).toLocaleString('ko-KR') : '미설정'}</div>
+          <div class="claim-name">${round.settlement_types?.name || ''} · ${round.period_label}</div>
+          <div class="claim-sub">마감 ${dueStr} · 대상 ${items.length}건</div>
         </div>
-        <span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>
-      </div>
-      ${c.reject_reason ? `<div class="hint" style="color:var(--danger);">반송 사유: ${c.reject_reason}</div>` : ''}
-      ${editable ? `
-        <div class="claim-form">
-          <div class="field"><label>청구금액</label><input type="number" class="amt-input" value="${c.claimed_amount ?? ''}"></div>
-          <div class="field"><label>청구서 파일</label><input type="file" class="file-input"></div>
-          <button class="btn btn-sm submit-btn">제출</button>
-        </div>` : `
-        <div class="hint">청구금액: ${c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—'}
-        ${c.file_path ? ' · <span class="file-link" data-path="'+c.file_path+'">내 파일 보기</span>' : ''}</div>
-      `}
-    `;
-    listEl.appendChild(card);
+      </div>`;
 
     if(editable){
-      card.querySelector('.submit-btn').addEventListener('click', () => submitClaim(c, card));
+      bodyHtml += `
+        <div class="field" style="margin-bottom:14px;">
+          <label>청구서 엑셀 업로드 (지점별 라인이 있으면 자동으로 아래 금액에 채워집니다)</label>
+          <input type="file" class="group-file-input" accept=".xlsx,.xls">
+          <div class="hint group-parse-hint"></div>
+        </div>`;
     }
-    const fl = card.querySelector('.file-link');
-    if(fl) fl.addEventListener('click', () => downloadFile(fl.dataset.path));
+
+    bodyHtml += `<table style="margin-top:4px;"><thead><tr><th>지점</th><th>상태</th><th>청구금액</th><th></th></tr></thead><tbody>`;
+    items.forEach(c => {
+      const label = c.workshops ? c.workshops.name : (myRetailer?.name || '법인 전체');
+      const rowEditable = editable && ['NOT_SUBMITTED','REJECTED'].includes(c.status);
+      bodyHtml += `<tr data-claim-id="${c.id}" data-workshop-code="${c.workshops?.code||''}">
+        <td>${label}</td>
+        <td><span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${c.reject_reason?`<div class="hint" style="color:var(--danger);">${c.reject_reason}</div>`:''}</td>
+        <td>${rowEditable
+            ? `<input type="text" inputmode="numeric" class="row-amt-input" style="width:130px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">`
+            : (c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—')}
+        </td>
+        <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">파일보기</span>` : ''}</td>
+      </tr>`;
+    });
+    bodyHtml += `</tbody></table>`;
+
+    if(editable){
+      bodyHtml += `<div class="action-row"><button class="btn btn-sm group-submit-btn">전체 제출</button></div>`;
+    }
+
+    card.innerHTML = bodyHtml;
+    listEl.appendChild(card);
+
+    card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+
+    const fileInput = card.querySelector('.group-file-input');
+    const hintEl = card.querySelector('.group-parse-hint');
+    if(fileInput){
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files[0];
+        if(!file) return;
+        try{
+          const buf = await file.arrayBuffer();
+          const parsed = parseClaimWorkbook(buf);
+          if(parsed.length === 0){
+            hintEl.textContent = '지점별 라인을 인식하지 못했습니다 — 금액을 직접 입력해주세요.';
+            return;
+          }
+          let matched = 0;
+          parsed.forEach(p => {
+            const ws = matchWorkshop(p.label);
+            if(!ws) return;
+            const rowEl = card.querySelector(`tr[data-workshop-code="${ws.code}"] .row-amt-input`);
+            if(rowEl){ rowEl.value = Number(p.amount).toLocaleString('ko-KR'); matched++; }
+          });
+          hintEl.textContent = `${parsed.length}개 라인 중 ${matched}개 지점 자동 매칭 완료. 금액을 확인한 뒤 제출해주세요.`;
+        } catch(e){
+          hintEl.textContent = '엑셀을 읽지 못했습니다: ' + e.message;
+        }
+      });
+    }
+
+    const submitBtn = card.querySelector('.group-submit-btn');
+    if(submitBtn){
+      submitBtn.addEventListener('click', () => submitGroup(card, items, fileInput?.files[0]));
+    }
+
+    card.querySelectorAll('.file-link').forEach(el => {
+      el.addEventListener('click', () => downloadFile(el.dataset.path));
+    });
   });
 }
 
-async function submitClaim(claim, card){
-  const amount = parseFloat(card.querySelector('.amt-input').value);
-  const file = card.querySelector('.file-input').files[0];
-  if(isNaN(amount)){ alert('청구금액을 입력해주세요.'); return; }
+async function submitGroup(card, items, file){
+  const rows = card.querySelectorAll('tbody tr');
+  const updates = [];
+  for(const rowEl of rows){
+    const amtInput = rowEl.querySelector('.row-amt-input');
+    if(!amtInput) continue; // 이미 제출되어 읽기전용인 행은 건너뜀
+    const amount = readAmountInput(amtInput);
+    if(amount == null){ continue; } // 비워둔 지점은 제출 대상에서 제외
+    updates.push({ claimId: rowEl.dataset.claimId, amount });
+  }
+  if(updates.length === 0){ alert('제출할 금액을 하나 이상 입력해주세요.'); return; }
 
-  let filePath = claim.file_path;
+  let sharedFilePath = null;
   if(file){
-    filePath = `${claim.retailer_id}/${claim.round_id}/${claim.id}-${file.name}`;
-    const { error: upErr } = await sb.storage.from('settlements').upload(filePath, file, { upsert:true });
+    const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    sharedFilePath = `${items[0].retailer_id}/${items[0].round_id}/GROUP-${Date.now()}-${safeName}`;
+    const { error: upErr } = await sb.storage.from('settlements').upload(sharedFilePath, file, { upsert:true });
     if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
   }
 
-  const { error } = await sb.from('claims').update({
-    claimed_amount: amount, file_path: filePath, status:'SUBMITTED', submitted_at: new Date().toISOString()
-  }).eq('id', claim.id);
-  if(error){ alert('제출 실패: ' + error.message); return; }
+  for(const u of updates){
+    const payload = { claimed_amount: u.amount, status:'SUBMITTED', submitted_at: new Date().toISOString() };
+    if(sharedFilePath) payload.file_path = sharedFilePath;
+    const { error } = await sb.from('claims').update(payload).eq('id', u.claimId);
+    if(error){ alert('제출 실패 (일부 항목): ' + error.message); }
+  }
   await loadRetailerClaims();
 }
 
