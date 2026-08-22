@@ -1289,29 +1289,33 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
     // 표지(AP without PO)에서 회차마다 바뀌는 값은 딱 2칸 — 날짜(E21), 설명(N35).
     // 나머지(E25/E29/E31/G49, N36 등)는 전부 이 값들이나 AP_input reqeust를 참조하는 수식이라 자동으로 맞음.
     if(coverSheet){
-      coverSheet.getCell('E21').value = new Date();
+      const now = new Date();
+      const dateOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const e21 = coverSheet.getCell('E21');
+      e21.value = dateOnly;
+      e21.numFmt = 'yyyy-mm-dd'; // 시간 제거, 날짜만 표시
       const desc = `${round.period_label} ${vLine.description||''}`.trim();
       coverSheet.getCell('N35').value = desc;
     }
 
-    // ---- Tax invoice 시트: 이미지 삽입 (원본은 빈 안내문구뿐이라 서식 훼손 없음) ----
-    let taxSheet = wb.getWorksheet('Tax invoice');
-    if(!taxSheet) taxSheet = wb.addWorksheet('Tax invoice');
-    let rowCursor = 3;
+    // ---- 원본의 빈 'Tax invoice' 안내 시트는 삭제하고, 리테일러별로 새 탭을 만들어 이미지 삽입 ----
+    // (기존 시트에 이어붙이는 대신 새 시트로 분리하면 손상 위험이 줄고, 요청하신 탭 분리와도 맞음)
+    const oldTaxSheet = wb.getWorksheet('Tax invoice');
+    if(oldTaxSheet) wb.removeWorksheet(oldTaxSheet.id);
+
     images.forEach(img => {
-      const label = taxSheet.getCell(`A${rowCursor}`);
-      label.value = img.retailerCode + ' 세금계산서';
-      label.font = { bold:true };
-      rowCursor += 1;
+      const sheetName = `Tax Invoice_${img.retailerCode}`.slice(0, 31); // 엑셀 시트명 31자 제한
+      const sheet = wb.addWorksheet(sheetName);
       const imageId = wb.addImage({ base64: img.base64, extension: img.extension });
-      taxSheet.addImage(imageId, {
-        tl: { col: 0, row: rowCursor }, // rowCursor(1-based 라벨 행) == 그 다음 행의 0-based 인덱스 → 라벨 바로 아래에 배치
+      sheet.addImage(imageId, {
+        tl: { col: 0, row: 0 },
         ext: { width: 650, height: 850 }
       });
-      rowCursor += 44; // 다음 이미지와 겹치지 않도록 충분히 내려줌
     });
 
-    const voucherBuffer = await wb.xlsx.writeBuffer();
+    // useSharedStrings:false — ExcelJS의 공유 문자열 테이블 재생성 과정에서 생기는
+    // "내용에 문제가 있습니다" 손상 경고를 피하기 위한 조치
+    const voucherBuffer = await wb.xlsx.writeBuffer({ useStyles:true, useSharedStrings:false });
 
     // ---- raw data 통합 근거파일 ----
     setProgress('근거파일(raw data 통합)을 만드는 중...');
