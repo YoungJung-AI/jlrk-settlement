@@ -228,6 +228,7 @@
 
       <div id="reviewSection"></div>
       <div id="invoiceSection"></div>
+      <div id="voucherSection"></div>
 
       <table id="claimsTable">
         <thead><tr><th>대상</th><th>상태</th><th>청구금액</th><th>확정금액</th><th>제출일시</th><th>파일</th></tr></thead>
@@ -310,6 +311,17 @@
     <div class="chip-list" id="retailerChips"></div>
     <div class="hint">선택 안 하면 활성 리테일러 전체가 대상입니다.</div>
 
+    <div class="section-label">바우처 설정 (AP Voucher)</div>
+    <div class="row2">
+      <div class="field"><label>GL 코드</label><input id="f_voucher_gl" placeholder="예: 700050800"></div>
+      <div class="field"><label>설명 (Text)</label><input id="f_voucher_desc" placeholder="예: FY27 Q1 Recall Campaign Upselling Program"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>LR 코스트센터</label><input id="f_voucher_cc_lr" placeholder="예: KR02LSU300"></div>
+      <div class="field"><label>JG 코스트센터</label><input id="f_voucher_cc_jg" placeholder="예: KR02JSU300"></div>
+    </div>
+    <div class="hint">바우처 생성 시 이 값들이 AP without PO / AP_input reqeust 시트에 그대로 들어갑니다.</div>
+
     <div class="section-label">상태</div>
     <div class="check-row"><input type="checkbox" id="f_is_active" checked><label for="f_is_active">활성 (회차 개설 시 목록에 노출)</label></div>
   </div>
@@ -342,6 +354,10 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
 const SUPABASE_URL = "https://yomuvsquaewmfxhfcgao.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_FfntgS9kX9mVfW7E_sBA7A_l8VX5nDA";
@@ -595,6 +611,11 @@ function openTypePanel(t){
   document.getElementById('f_amount_cap').value = t?.amount_cap || '';
   document.getElementById('f_notify').value = t?.notify || 'INSTANT';
   document.getElementById('f_reminder_days').value = (t?.reminder_days || [3,1]).join(',');
+  const vLine = t?.voucher_lines?.[0] || {};
+  document.getElementById('f_voucher_gl').value = vLine.gl_code || '';
+  document.getElementById('f_voucher_desc').value = vLine.description || '';
+  document.getElementById('f_voucher_cc_lr').value = vLine.cc_lr || '';
+  document.getElementById('f_voucher_cc_jg').value = vLine.cc_jg || '';
   document.getElementById('f_is_active').checked = t ? !!t.is_active : true;
   selectedRetailerIds = new Set(t?.target_retailers || []);
   document.querySelectorAll('#retailerChips .chip').forEach(chip => chip.classList.toggle('selected', selectedRetailerIds.has(chip.dataset.id)));
@@ -624,6 +645,12 @@ document.getElementById('saveTypeBtn').addEventListener('click', async () => {
     notify: document.getElementById('f_notify').value,
     reminder_days: reminderDays,
     target_retailers: selectedRetailerIds.size ? Array.from(selectedRetailerIds) : null,
+    voucher_lines: [{
+      gl_code: document.getElementById('f_voucher_gl').value.trim(),
+      description: document.getElementById('f_voucher_desc').value.trim(),
+      cc_lr: document.getElementById('f_voucher_cc_lr').value.trim(),
+      cc_jg: document.getElementById('f_voucher_cc_jg').value.trim()
+    }],
     is_active: document.getElementById('f_is_active').checked
   };
   if(!payload.code || !payload.name){ alert('유형코드와 유형명은 필수입니다.'); return; }
@@ -716,7 +743,7 @@ async function renderRoundDetail(){
   document.getElementById('rd_due').textContent = round.claim_due_at ? new Date(round.claim_due_at).toLocaleString('ko-KR') : '미설정';
 
   const { data: claims } = await sb.from('claims')
-    .select('*, retailers(code,name,biz_no), workshops(name, biz_no)')
+    .select('*, retailers(code,name,biz_no,email), workshops(name, code, biz_no, vendor_code)')
     .eq('round_id', currentRoundId)
     .order('created_at');
 
@@ -856,6 +883,13 @@ async function renderRoundDetail(){
     card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
   }
 
+  /* ---------- 바우처 생성 섹션 (INVOICED) ---------- */
+  const voucherSection = document.getElementById('voucherSection');
+  voucherSection.innerHTML = '';
+  if(round.status === 'INVOICED' || round.status === 'VOUCHERED'){
+    await renderVoucherSection(round, type, claims);
+  }
+
   /* ---------- 전체 청구 목록 (참고용) ---------- */
   const tbody = document.getElementById('claimsBody');
   tbody.innerHTML = '';
@@ -973,6 +1007,339 @@ async function finalizeInvoices(round){
   const { error } = await sb.from('rounds').update({ status:'INVOICED' }).eq('id', round.id);
   if(error){ alert('처리 실패: '+error.message); return; }
   await renderRoundDetail();
+}
+
+/* ================================================================
+   Phase 4 — 바우처 생성
+   ================================================================ */
+
+// pdf.js worker 설정 (한 번만)
+if(window.pdfjsLib){
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+function normalizeBrand(v){
+  const s = String(v||'').trim().toUpperCase();
+  if(s === 'J' || s === 'JAGUAR') return 'JG';
+  if(s === 'L' || s === 'LAND ROVER' || s === 'LANDROVER') return 'LR';
+  return null;
+}
+
+async function renderVoucherSection(round, type, claims){
+  const voucherSection = document.getElementById('voucherSection');
+  const { data: invoices } = await sb.from('invoices').select('*, retailers(code,name)').eq('round_id', round.id);
+  const ready = (invoices||[]).filter(i => ['SUBMITTED','ACCEPTED'].includes(i.status));
+
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `<div class="section-label" style="margin-top:0;">바우처 생성 (${ready.length}개 리테일러 대상)</div>`;
+
+  if(ready.length === 0){
+    card.innerHTML += '<div class="hint">계산서가 제출된 리테일러가 아직 없습니다.</div>';
+    voucherSection.appendChild(card);
+    return;
+  }
+
+  // 리테일러별 대표 지점 선택 UI (기본값: 승인금액 최대 지점)
+  const tbl = document.createElement('table');
+  tbl.innerHTML = '<thead><tr><th>리테일러</th><th>승인총액</th><th>대표 지점 (eSmart vendor code)</th></tr></thead><tbody></tbody>';
+  const tb = tbl.querySelector('tbody');
+  ready.forEach(inv => {
+    const myClaims = (claims||[]).filter(c => c.retailer_id === inv.retailer_id && c.status === 'APPROVED');
+    const total = myClaims.reduce((s,c) => s + Number(c.approved_amount||0), 0);
+    const workshopOptions = myClaims
+      .filter(c => c.workshops)
+      .sort((a,b) => Number(b.approved_amount||0) - Number(a.approved_amount||0))
+      .map((c,idx) => `<option value="${c.workshops.code}" ${idx===0?'selected':''}>${c.workshops.name} (${c.workshops.vendor_code||'코드없음'})</option>`)
+      .join('');
+    const tr = document.createElement('tr');
+    tr.dataset.retailerId = inv.retailer_id;
+    tr.innerHTML = `
+      <td>${inv.retailers?.code||''}</td>
+      <td>${Number(total).toLocaleString('ko-KR')}원</td>
+      <td><select class="primary-ws-select" style="width:220px;">${workshopOptions || '<option value="">지점 정보 없음</option>'}</select></td>`;
+    tb.appendChild(tr);
+  });
+  card.appendChild(tbl);
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'action-row';
+  btnRow.innerHTML = `
+    <button class="btn" id="generateVoucherBtn">바우처 생성 (zip 다운로드)</button>
+    ${round.status === 'INVOICED' ? '<button class="btn btn-ghost" id="markVoucheredBtn">완료 처리</button>' : ''}
+  `;
+  card.appendChild(btnRow);
+  const progressEl = document.createElement('div');
+  progressEl.className = 'hint';
+  progressEl.style.marginTop = '8px';
+  card.appendChild(progressEl);
+
+  voucherSection.appendChild(card);
+
+  document.getElementById('generateVoucherBtn').addEventListener('click', async () => {
+    const rows = Array.from(tbl.querySelectorAll('tbody tr'));
+    const selections = rows.map(tr => ({
+      retailerId: tr.dataset.retailerId,
+      workshopCode: tr.querySelector('.primary-ws-select').value
+    }));
+    if(selections.some(s => !s.workshopCode)){
+      alert('대표 지점이 지정되지 않은 리테일러가 있습니다.');
+      return;
+    }
+    await generateVoucher(round, type, claims, ready, selections, progressEl);
+  });
+
+  const markBtn = document.getElementById('markVoucheredBtn');
+  if(markBtn){
+    markBtn.addEventListener('click', async () => {
+      if(!confirm('바우처 생성을 완료 처리할까요? (회차가 종료 상태로 바뀝니다)')) return;
+      const { error } = await sb.from('rounds').update({ status:'VOUCHERED' }).eq('id', round.id);
+      if(error){ alert('처리 실패: '+error.message); return; }
+      await renderRoundDetail();
+    });
+  }
+}
+
+async function generateVoucher(round, type, claims, readyInvoices, selections, progressEl){
+  const setProgress = (msg) => { progressEl.textContent = msg; };
+  try{
+    setProgress('리테일러별 원본 청구서를 다시 불러오는 중...');
+
+    const vLine = type.voucher_lines?.[0] || {};
+    const combinedRawRows = [];   // 근거파일용
+    const retailerResults = [];  // 바우처 라인용
+
+    for(const inv of readyInvoices){
+      const sel = selections.find(s => s.retailerId === inv.retailer_id);
+      const myClaims = (claims||[]).filter(c => c.retailer_id === inv.retailer_id && c.status === 'APPROVED');
+      const approvedTotal = myClaims.reduce((s,c) => s + Number(c.approved_amount||0), 0);
+      const primaryWorkshop = myClaims.find(c => c.workshops?.code === sel.workshopCode)?.workshops;
+
+      // 리테일러가 제출한 원본 파일들(그룹 공유 파일이라 중복 제거)을 다시 열어 raw 시트 추출
+      const filePaths = Array.from(new Set(myClaims.map(c => c.file_path).filter(Boolean)));
+      let jgSum = 0, lrSum = 0, unknownSum = 0;
+      for(const path of filePaths){
+        try{
+          const { data: signed } = await sb.storage.from('settlements').createSignedUrl(path, 60);
+          if(!signed) continue;
+          const resp = await fetch(signed.signedUrl);
+          const buf = await resp.arrayBuffer();
+          const wb = XLSX.read(buf, { type:'array' });
+          if(!wb.SheetNames.includes('raw')) continue;
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets['raw'], { header:1, defval:'' });
+          // 헤더 행 탐색: '브랜드' 포함 행
+          let headerIdx = -1;
+          for(let i=0;i<rows.length;i++){
+            if(rows[i].some(c => String(c).includes('브랜드'))){ headerIdx = i; break; }
+          }
+          if(headerIdx === -1) continue;
+          const header = rows[headerIdx];
+          const brandCol = header.findIndex(c => String(c).includes('브랜드'));
+          const amtCol = header.findIndex(c => /지원금|JLRK/i.test(String(c)));
+          if(brandCol === -1 || amtCol === -1) continue;
+          for(let i=headerIdx+1; i<rows.length; i++){
+            const row = rows[i];
+            if(!row || row.every(c => c === '')) continue;
+            const brand = normalizeBrand(row[brandCol]);
+            const amt = parseFloat(String(row[amtCol]).replace(/,/g,''));
+            if(!isNaN(amt)){
+              if(brand === 'JG') jgSum += amt;
+              else if(brand === 'LR') lrSum += amt;
+              else unknownSum += amt;
+            }
+            // 근거파일용 원본 행 그대로 보존 + 리테일러 코드 태그
+            const tagged = {};
+            header.forEach((h, idx) => { tagged[h || `col${idx}`] = row[idx]; });
+            tagged['리테일러(시스템)'] = inv.retailers?.code || '';
+            combinedRawRows.push(tagged);
+          }
+        } catch(e){ console.error('raw 파싱 실패', path, e); }
+      }
+
+      const brandTotal = jgSum + lrSum;
+      let jgAmount, lrAmount;
+      if(brandTotal > 0){
+        const jgRatio = jgSum / brandTotal;
+        jgAmount = Math.round(approvedTotal * jgRatio);
+        lrAmount = approvedTotal - jgAmount;
+      } else {
+        // raw 시트에서 브랜드를 못 찾은 경우: 전액 LR로 처리 (수동 확인 필요 표시)
+        jgAmount = 0;
+        lrAmount = approvedTotal;
+      }
+
+      retailerResults.push({
+        retailerCode: inv.retailers?.code || '',
+        retailerName: inv.retailers?.name || '',
+        vendorCode: primaryWorkshop?.vendor_code || '',
+        bizNo: primaryWorkshop?.biz_no || '',
+        approvedTotal, jgAmount, lrAmount,
+        brandDataFound: brandTotal > 0,
+        vat: Number(inv.vat||0),
+        invoiceFilePath: inv.file_path
+      });
+    }
+
+    setProgress('세금계산서 이미지를 변환하는 중...');
+    const images = [];
+    for(const r of retailerResults){
+      if(!r.invoiceFilePath) continue;
+      try{
+        const { data: signed } = await sb.storage.from('settlements').createSignedUrl(r.invoiceFilePath, 60);
+        if(!signed) continue;
+        const resp = await fetch(signed.signedUrl);
+        const buf = await resp.arrayBuffer();
+        // PDF만 이미지 변환 지원 (jpg/png는 그대로 사용)
+        const isPdf = r.invoiceFilePath.toLowerCase().endsWith('.pdf');
+        let base64;
+        if(isPdf){
+          const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+          const page = await pdf.getPage(1);
+          const viewport = page.getViewport({ scale: 1.5 });
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width; canvas.height = viewport.height;
+          await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+          base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+        } else {
+          base64 = btoa(new Uint8Array(buf).reduce((s,b) => s + String.fromCharCode(b), ''));
+        }
+        images.push({ retailerCode: r.retailerCode, base64, extension: 'jpeg' });
+      } catch(e){ console.error('이미지 변환 실패', r.retailerCode, e); }
+    }
+
+    setProgress('바우처 엑셀을 작성하는 중...');
+    const totalNet = retailerResults.reduce((s,r) => s + r.approvedTotal, 0);
+    const totalVat = retailerResults.reduce((s,r) => s + r.vat, 0);
+    const totalJG = retailerResults.reduce((s,r) => s + r.jgAmount, 0);
+    const totalLR = retailerResults.reduce((s,r) => s + r.lrAmount, 0);
+
+    const wb = new ExcelJS.Workbook();
+
+    // ---- 시트 1: AP without PO (표지) ----
+    const coverSheet = wb.addWorksheet('AP without PO');
+    coverSheet.columns = [{width:28},{width:20},{width:20},{width:20}];
+    coverSheet.addRow(['Request of IR Input in eSmart (AP voucher without PO)']);
+    coverSheet.addRow([]);
+    coverSheet.addRow(['1) Vendor Name', 'All Retailer']);
+    coverSheet.addRow(['2) Invoice Date', new Date().toISOString().slice(0,10)]);
+    coverSheet.addRow(['3) Currency', 'KRW']);
+    coverSheet.addRow(['4) Amount excluding VAT (a)', totalNet]);
+    coverSheet.addRow(['5) VAT tax code', 'V1: 10%']);
+    coverSheet.addRow(['6) VAT amount (b)', totalVat]);
+    coverSheet.addRow(['7) Total amount (a)+(b)', totalNet + totalVat]);
+    coverSheet.addRow([]);
+    coverSheet.addRow(['Cost center (LR)', vLine.cc_lr||'', 'GL code', vLine.gl_code||'', 'Amount', totalLR]);
+    coverSheet.addRow(['Cost center (JG)', vLine.cc_jg||'', 'GL code', vLine.gl_code||'', 'Amount', totalJG]);
+    coverSheet.addRow(['Text(Description)', vLine.description||'']);
+    coverSheet.addRow(['Total', totalNet, '', (totalLR+totalJG===totalNet?'OK':'CHECK')]);
+
+    // ---- 시트 2: AP_input reqeust ----
+    const inputSheet = wb.addWorksheet('AP_input reqeust');
+    inputSheet.columns = [
+      {header:'Vendor Code', key:'vendorCode', width:14},
+      {header:'Biz No.', key:'bizNo', width:14},
+      {header:'Supplier Name', key:'name', width:24},
+      {header:'Amount excl VAT', key:'net', width:16},
+      {header:'VAT', key:'vat', width:14},
+      {header:'Total', key:'total', width:16},
+      {header:'JG(0200)', key:'jg', width:14},
+      {header:'LR(0100)', key:'lr', width:14},
+      {header:'Text(Description)', key:'desc', width:36},
+      {header:'브랜드 데이터', key:'brandFound', width:14}
+    ];
+    inputSheet.getRow(1).font = { bold:true };
+    retailerResults.forEach(r => {
+      inputSheet.addRow({
+        vendorCode: r.vendorCode, bizNo: r.bizNo, name: `${r.retailerCode} ${r.retailerName}`,
+        net: r.approvedTotal, vat: r.vat, total: r.approvedTotal + r.vat,
+        jg: r.jgAmount, lr: r.lrAmount, desc: vLine.description||'',
+        brandFound: r.brandDataFound ? '자동계산' : '⚠️확인필요(전액LR처리)'
+      });
+    });
+    const totalRow = inputSheet.addRow({
+      vendorCode:'', bizNo:'', name:'합계',
+      net: totalNet, vat: totalVat, total: totalNet+totalVat, jg: totalJG, lr: totalLR
+    });
+    totalRow.font = { bold:true };
+
+    // ---- 시트 3: Tax invoice (이미지 삽입) ----
+    const taxSheet = wb.addWorksheet('Tax invoice');
+    taxSheet.getColumn(1).width = 90;
+    let rowCursor = 1;
+    images.forEach(img => {
+      const label = taxSheet.getCell(`A${rowCursor}`);
+      label.value = img.retailerCode + ' 세금계산서';
+      label.font = { bold:true };
+      rowCursor += 1;
+      const imageId = wb.addImage({ base64: img.base64, extension: img.extension });
+      taxSheet.addImage(imageId, {
+        tl: { col: 0, row: rowCursor - 1 },
+        ext: { width: 650, height: 850 }
+      });
+      rowCursor += 44; // 다음 이미지와 겹치지 않도록 충분히 내려줌
+    });
+
+    const voucherBuffer = await wb.xlsx.writeBuffer();
+
+    // ---- raw data 통합 근거파일 ----
+    setProgress('근거파일(raw data 통합)을 만드는 중...');
+    const rawWb = new ExcelJS.Workbook();
+    const rawSheet = rawWb.addWorksheet('raw_통합');
+    if(combinedRawRows.length > 0){
+      const cols = Object.keys(combinedRawRows[0]);
+      rawSheet.columns = cols.map(c => ({ header:c, key:c, width:16 }));
+      rawSheet.getRow(1).font = { bold:true };
+      combinedRawRows.forEach(r => rawSheet.addRow(r));
+    } else {
+      rawSheet.addRow(['원본 청구서에서 raw 시트를 찾지 못해 근거 데이터가 비어 있습니다.']);
+    }
+    const rawBuffer = await rawWb.xlsx.writeBuffer();
+
+    // ---- 표지 PDF ----
+    setProgress('표지 PDF를 만드는 중...');
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF();
+    let y = 20;
+    pdf.setFontSize(14); pdf.text('Request of IR Input in eSmart (AP voucher without PO)', 14, y); y += 10;
+    pdf.setFontSize(10);
+    const lines = [
+      ['Vendor Name', 'All Retailer'],
+      ['Invoice Date', new Date().toISOString().slice(0,10)],
+      ['Currency', 'KRW'],
+      ['Amount excl VAT (a)', totalNet.toLocaleString('ko-KR')],
+      ['VAT tax code', 'V1: 10%'],
+      ['VAT amount (b)', totalVat.toLocaleString('ko-KR')],
+      ['Total amount (a)+(b)', (totalNet+totalVat).toLocaleString('ko-KR')],
+      ['Cost center (LR)', `${vLine.cc_lr||''} / GL ${vLine.gl_code||''} / ${totalLR.toLocaleString('ko-KR')}`],
+      ['Cost center (JG)', `${vLine.cc_jg||''} / GL ${vLine.gl_code||''} / ${totalJG.toLocaleString('ko-KR')}`],
+      ['Text(Description)', vLine.description || '']
+    ];
+    lines.forEach(([k,v]) => { pdf.text(`${k}: ${v}`, 14, y); y += 8; });
+    const pdfBlob = pdf.output('blob');
+
+    // ---- zip 묶기 ----
+    setProgress('파일을 압축하는 중...');
+    const zip = new JSZip();
+    zip.file('바우처.xlsx', voucherBuffer);
+    zip.file('바우처_표지.pdf', pdfBlob);
+    zip.file('raw_data_통합.xlsx', rawBuffer);
+    const zipBlob = await zip.generateAsync({ type:'blob' });
+
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${round.period_label}_바우처.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+
+    const { data: { user } } = await sb.auth.getUser();
+    await sb.from('vouchers').insert({ round_id: round.id, retailer_id: null, generated_by: user?.id || null });
+
+    setProgress('완료! zip 파일이 다운로드되었습니다. 내용을 확인한 뒤 [완료 처리]를 눌러주세요.');
+  } catch(e){
+    console.error(e);
+    setProgress('생성 실패: ' + e.message);
+  }
 }
 
 async function openRound(round, type){
