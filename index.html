@@ -847,16 +847,26 @@ async function loadRetailerClaims(){
     items.forEach(c => {
       const label = c.workshops ? c.workshops.name : (myRetailer?.name || '법인 전체');
       const rowEditable = editable && ['NOT_SUBMITTED','REJECTED'].includes(c.status);
+      const canCancel = editable && c.status === 'SUBMITTED';
+      const amountText = c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—';
+      let amountCell;
+      if(rowEditable){
+        amountCell = `<div style="display:flex; gap:6px; align-items:center;">
+             <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">
+             <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
+           </div>`;
+      } else if(canCancel){
+        amountCell = `<div style="display:flex; gap:8px; align-items:center;">
+             <span>${amountText}</span>
+             <button type="button" class="btn btn-ghost cancel-btn" data-claim-id="${c.id}" style="padding:6px 9px; font-size:11px;">청구취소</button>
+           </div>`;
+      } else {
+        amountCell = amountText;
+      }
       bodyHtml += `<tr data-claim-id="${c.id}" data-workshop-code="${c.workshops?.code||''}">
         <td>${label}</td>
         <td><span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${c.reject_reason?`<div class="hint" style="color:var(--danger);">${c.reject_reason}</div>`:''}</td>
-        <td>${rowEditable
-            ? `<div style="display:flex; gap:6px; align-items:center;">
-                 <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">
-                 <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
-               </div>`
-            : (c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—')}
-        </td>
+        <td>${amountCell}</td>
         <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">파일보기</span>` : ''}</td>
       </tr>`;
     });
@@ -886,6 +896,14 @@ async function loadRetailerClaims(){
         if(!confirm(`${rowLabel} — 이번 회차에 정말 청구금액이 없습니까? 0원으로 제출됩니다.`)) return;
         input.value = '0';
         updateGroupTotal(card);
+      });
+    });
+    card.querySelectorAll('.cancel-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if(!confirm('제출을 취소하고 다시 수정할까요? 취소하면 관리자 화면에는 다시 미제출로 표시됩니다.')) return;
+        const { error } = await sb.from('claims').update({ status:'NOT_SUBMITTED', submitted_at:null }).eq('id', btn.dataset.claimId);
+        if(error){ alert('취소 실패: ' + error.message); return; }
+        await loadRetailerClaims();
       });
     });
     updateGroupTotal(card);
