@@ -375,11 +375,15 @@ function updateGroupTotal(card){
     if(input){
       const v = readAmountInput(input);
       if(v) sum += v;
-    } else {
-      const cell = rowEl.children[2];
-      const v = parseInt(String(cell?.textContent||'').replace(/[^\d]/g,''), 10);
-      if(!isNaN(v)) sum += v;
+      return;
     }
+    // 확정금액(index 3) 이 있으면 그걸 우선 쓰고, 없으면 청구금액(index 2)
+    const approvedCell = rowEl.children[3];
+    const claimedCell = rowEl.children[2];
+    const approvedText = approvedCell?.textContent?.trim();
+    const source = (approvedText && approvedText !== '—') ? approvedCell : claimedCell;
+    const v = parseInt(String(source?.textContent||'').replace(/[^\d]/g,''), 10);
+    if(!isNaN(v)) sum += v;
   });
   const totalEl = card.querySelector('.group-total-value');
   if(totalEl) totalEl.textContent = sum.toLocaleString('ko-KR') + '원';
@@ -1052,20 +1056,19 @@ async function loadRetailerClaims(){
         </div>`;
     }
 
-    bodyHtml += `<table style="margin-top:4px;"><thead><tr><th>지점</th><th>상태</th><th>청구금액</th><th></th></tr></thead><tbody>`;
+    bodyHtml += `<table style="margin-top:4px;"><thead><tr><th>지점</th><th>상태</th><th>청구금액</th><th>확정금액</th><th></th></tr></thead><tbody>`;
     items.forEach(c => {
       const label = c.workshops ? c.workshops.name : (myRetailer?.name || '법인 전체');
       const isRejected = c.status === 'REJECTED';
       const rowEditable = !isRejected && withinDeadline && c.status === 'NOT_SUBMITTED';
       const canCancel = withinDeadline && c.status === 'SUBMITTED';
       const claimedStr = c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—';
-      const amountText = c.approved_amount != null
-        ? `<div>청구 ${claimedStr}</div><div style="color:var(--accent); font-weight:600;">확정 ${Number(c.approved_amount).toLocaleString('ko-KR')}원</div>`
-        : claimedStr;
-      let amountCell;
+      const approvedStr = c.approved_amount != null ? Number(c.approved_amount).toLocaleString('ko-KR')+'원' : '—';
+
+      let claimedCell;
       if(isRejected){
         const suggested = c.detail?.admin_suggested_amount;
-        amountCell = `<div style="display:flex; flex-direction:column; gap:6px;">
+        claimedCell = `<div style="display:flex; flex-direction:column; gap:6px;">
              <div style="display:flex; gap:6px; align-items:center;">
                <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${suggested!=null?Number(suggested).toLocaleString('ko-KR'):(c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):'')}">
                <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
@@ -1076,18 +1079,22 @@ async function loadRetailerClaims(){
              </div>
            </div>`;
       } else if(rowEditable){
-        amountCell = `<div style="display:flex; gap:6px; align-items:center;">
+        claimedCell = `<div style="display:flex; gap:6px; align-items:center;">
              <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">
              <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
            </div>`;
       } else if(canCancel){
-        amountCell = `<div style="display:flex; gap:8px; align-items:center;">
-             <span>${amountText}</span>
+        claimedCell = `<div style="display:flex; gap:8px; align-items:center;">
+             <span>${claimedStr}</span>
              <button type="button" class="btn btn-ghost cancel-btn" data-claim-id="${c.id}" style="padding:6px 9px; font-size:11px;">제출취소</button>
            </div>`;
       } else {
-        amountCell = amountText;
+        claimedCell = claimedStr;
       }
+      const approvedCell = c.approved_amount != null
+        ? `<span style="color:var(--accent); font-weight:600;">${approvedStr}</span>`
+        : '—';
+
       const statusExtra = [
         c.status === 'REJECTED' && c.reject_reason ? `<div class="hint" style="color:var(--danger);">사유: ${c.reject_reason}</div>` : '',
         c.status === 'REJECTED' && c.detail?.admin_suggested_amount != null ? `<div class="hint">관리자 제안금액: ${Number(c.detail.admin_suggested_amount).toLocaleString('ko-KR')}원</div>` : '',
@@ -1098,13 +1105,14 @@ async function loadRetailerClaims(){
       bodyHtml += `<tr data-claim-id="${c.id}" data-workshop-code="${c.workshops?.code||''}">
         <td>${label}</td>
         <td><span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${statusExtra}</td>
-        <td>${amountCell}</td>
+        <td>${claimedCell}</td>
+        <td>${approvedCell}</td>
         <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">파일보기</span>` : ''}</td>
       </tr>`;
     });
     bodyHtml += `</tbody>
       <tfoot><tr>
-        <td colspan="2" style="text-align:right;">합계</td>
+        <td colspan="3" style="text-align:right;">합계</td>
         <td class="group-total-value">0원</td>
         <td></td>
       </tr></tfoot>
