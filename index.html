@@ -1010,7 +1010,7 @@ async function loadRetailerClaims(){
   listEl.innerHTML = '';
 
   const { data: claims, error } = await sb.from('claims')
-    .select('*, rounds(period_label, status, claim_due_at, invoice_due_at, settlement_types(name, direction, claim_unit)), workshops(name, code, biz_no)')
+    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, settlement_types(name, direction, claim_unit)), workshops(name, code, biz_no)')
     .order('created_at', { ascending:true });
 
   if(error){ console.error(error); return; }
