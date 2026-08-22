@@ -1092,7 +1092,19 @@ function cellRefToRC(ref){
 
 // 엑셀 표지 시트를 HTML 표로 재구성해 캡처 → PDF 1페이지로 저장 (엑셀을 못 여는 환경에서도 표지 그대로 보이게)
 async function buildCoverPdfBlob(coverSheet){
-  const dims = coverSheet.dimensions;
+  let dims = coverSheet.dimensions;
+  // 엑셀에 지정된 인쇄영역(Print_Area)이 있으면 그 범위만 캡처
+  const printArea = coverSheet.pageSetup?.printArea;
+  if(printArea){
+    const first = printArea.split(',')[0].trim();
+    const cleaned = first.includes('!') ? first.split('!')[1] : first;
+    const [startRefRaw, endRefRaw] = cleaned.replace(/\$/g, '').split(':');
+    if(startRefRaw){
+      const s = cellRefToRC(startRefRaw);
+      const e = endRefRaw ? cellRefToRC(endRefRaw) : s;
+      dims = { top:s.row, left:s.col, bottom:e.row, right:e.col };
+    }
+  }
   if(!dims) return null;
   const merges = coverSheet.model.merges || [];
   const mergeInfo = new Map();
@@ -1432,45 +1444,25 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
     // 연결정보 없이 이름만 남겨 "손상됨" 오류의 원인이 됨 — 실제 시트에서 안 쓰는 죽은 이름들이라 제거
     voucherBuffer = await stripExternalDefinedNames(voucherBuffer);
 
-    // ---- raw data 통합 근거파일: 리테일러가 실제로 올린 원본 양식(헤더/서식/열너비) 그대로 재사용 ----
+    // ---- raw data 통합 근거파일 ----
+    // 원본 raw 시트는 엑셀 "표(Table)" 기능으로 묶여 있어, 그 안의 행을 지우고 채우면
+    // 표의 범위 정의가 깨져 파일이 손상됨 → 원본 시트는 건드리지 않고, 같은 헤더로
+    // 깨끗한 새 시트를 만들어 전체 리테일러 데이터를 정리하는 방식으로 전환
     setProgress('근거파일(raw data 통합)을 만드는 중...');
     let rawBuffer;
-    if(firstRawTemplateBuffer && combinedRawRows.length > 0){
+    if(combinedRawRows.length > 0){
       const rawWb = new ExcelJS.Workbook();
-      await rawWb.xlsx.load(firstRawTemplateBuffer);
-      rawWb.calcProperties.fullCalcOnLoad = true;
-      const rawSheet = rawWb.getWorksheet('raw');
-      if(rawSheet){
-        // 원본과 동일한 기준으로 헤더 행(브랜드 컬럼 포함) 재탐색
-        let headerRowNum = -1;
-        const headerMap = {};
-        for(let r = 1; r <= 10; r++){
-          const row = rawSheet.getRow(r);
-          let found = false;
-          row.eachCell({ includeEmpty:false }, (cell) => { if(String(cell.value||'').includes('브랜드')) found = true; });
-          if(found){
-            headerRowNum = r;
-            row.eachCell({ includeEmpty:false }, (cell, colNumber) => { headerMap[colNumber] = String(cell.value||'').trim(); });
-            break;
-          }
-        }
-        if(headerRowNum > -1){
-          const lastRow = rawSheet.lastRow ? rawSheet.lastRow.number : headerRowNum;
-          if(lastRow > headerRowNum) rawSheet.spliceRows(headerRowNum+1, lastRow-headerRowNum);
-          const maxCol = Math.max(...Object.keys(headerMap).map(Number));
-          const tagCol = maxCol + 1;
-          rawSheet.getRow(headerRowNum).getCell(tagCol).value = '리테일러(시스템)';
-          combinedRawRows.forEach((rowObj, idx) => {
-            const excelRow = rawSheet.getRow(headerRowNum + 1 + idx);
-            Object.entries(headerMap).forEach(([colNumber, headerText]) => {
-              excelRow.getCell(Number(colNumber)).value = rowObj[headerText] ?? '';
-            });
-            excelRow.getCell(tagCol).value = rowObj['리테일러(시스템)'] || '';
-          });
-        }
-      }
-      rawBuffer = await rawWb.xlsx.writeBuffer({ useStyles:true, useSharedStrings:false });
-      rawBuffer = await stripExternalDefinedNames(rawBuffer);
+      const rawSheet = rawWb.addWorksheet('raw_통합');
+      const cols = Object.keys(combinedRawRows[0]);
+      rawSheet.columns = cols.map(c => ({ header:c, key:c, width: Math.max(12, Math.min(28, c.length*2)) }));
+      const headerRow = rawSheet.getRow(1);
+      headerRow.font = { bold:true, color:{ argb:'FFFFFFFF' } };
+      headerRow.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF2F5C4A' } };
+      headerRow.alignment = { vertical:'middle', horizontal:'center' };
+      rawSheet.views = [{ state:'frozen', ySplit:1 }];
+      combinedRawRows.forEach(r => rawSheet.addRow(r));
+      rawSheet.eachRow(row => { row.eachCell(cell => { cell.border = { bottom:{style:'thin', color:{argb:'FFDDDDDD'}} }; }); });
+      rawBuffer = await rawWb.xlsx.writeBuffer();
     } else {
       const rawWb = new ExcelJS.Workbook();
       const rawSheet = rawWb.addWorksheet('raw_통합');
