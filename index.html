@@ -320,13 +320,13 @@
     <div class="section-label">바우처 설정 (AP Voucher)</div>
     <div class="row2">
       <div class="field"><label>GL 코드</label><input id="f_voucher_gl" placeholder="예: 700050800"></div>
-      <div class="field"><label>설명 (Text)</label><input id="f_voucher_desc" placeholder="예: FY27 Q1 Recall Campaign Upselling Program"></div>
+      <div class="field"><label>설명 (Text) — 회차명 제외한 프로그램명만</label><input id="f_voucher_desc" placeholder="예: Recall Campaign Upselling Program"></div>
     </div>
     <div class="row2">
       <div class="field"><label>LR 코스트센터</label><input id="f_voucher_cc_lr" placeholder="예: KR02LSU300"></div>
       <div class="field"><label>JG 코스트센터</label><input id="f_voucher_cc_jg" placeholder="예: KR02JSU300"></div>
     </div>
-    <div class="hint">바우처 생성 시 이 값들이 AP without PO / AP_input reqeust 시트에 그대로 들어갑니다.</div>
+    <div class="hint">GL코드·코스트센터·설명은 이 유형에서 고정값으로 관리됩니다. 바우처 생성 시 회차 기간이 설명 앞에 자동으로 붙고(예: "FY27 Q1 Recall Campaign Upselling Program"), 계산서 날짜도 생성 시점에 자동으로 채워집니다.</div>
 
     <div class="field">
       <label>바우처 템플릿 업로드 (.xlsx)</label>
@@ -1257,9 +1257,11 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
 
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(tplBuffer); // 서식·색상·표·수식 전부 원본 그대로 유지됨
+    wb.calcProperties.fullCalcOnLoad = true; // 값만 바뀌고 캐시된 계산결과가 안 맞아 "손상됨"으로 뜨는 것 방지 — 열 때 강제 재계산
 
     const inputSheet = wb.getWorksheet('AP_input reqeust');
     if(!inputSheet) throw new Error("템플릿에 'AP_input reqeust' 시트가 없습니다. 원본 파일이 맞는지 확인해주세요.");
+    const coverSheet = wb.getWorksheet('AP without PO');
 
     // 템플릿에 이미 존재하는 vendor code(D열) → 행번호 매핑 (기존 행만 채움, 새 행 추가하지 않음)
     const vendorRowMap = new Map();
@@ -1284,8 +1286,13 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
       setProgress(`⚠️ ${unmatched.length}건은 템플릿에서 vendor code(${unmatched.map(u=>u.vendorCode).join(', ')})를 찾지 못해 채우지 못했습니다. 대표 지점을 다시 확인해주세요.`);
     }
 
-    // 표지(AP without PO) 시트는 건드리지 않음 — 원본이 'AP_input reqeust' 값을 참조하는
-    // 수식(E25/E29/E31/G49 등)으로 이미 구성되어 있으므로, 열어서 재계산만 하면 자동으로 맞음.
+    // 표지(AP without PO)에서 회차마다 바뀌는 값은 딱 2칸 — 날짜(E21), 설명(N35).
+    // 나머지(E25/E29/E31/G49, N36 등)는 전부 이 값들이나 AP_input reqeust를 참조하는 수식이라 자동으로 맞음.
+    if(coverSheet){
+      coverSheet.getCell('E21').value = new Date();
+      const desc = `${round.period_label} ${vLine.description||''}`.trim();
+      coverSheet.getCell('N35').value = desc;
+    }
 
     // ---- Tax invoice 시트: 이미지 삽입 (원본은 빈 안내문구뿐이라 서식 훼손 없음) ----
     let taxSheet = wb.getWorksheet('Tax invoice');
@@ -1298,7 +1305,7 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
       rowCursor += 1;
       const imageId = wb.addImage({ base64: img.base64, extension: img.extension });
       taxSheet.addImage(imageId, {
-        tl: { col: 0, row: rowCursor - 1 },
+        tl: { col: 0, row: rowCursor }, // rowCursor(1-based 라벨 행) == 그 다음 행의 0-based 인덱스 → 라벨 바로 아래에 배치
         ext: { width: 650, height: 850 }
       });
       rowCursor += 44; // 다음 이미지와 겹치지 않도록 충분히 내려줌
