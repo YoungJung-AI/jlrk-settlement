@@ -225,8 +225,12 @@
         </div>
         <div class="action-row" id="rd_actions"></div>
       </div>
+
+      <div id="reviewSection"></div>
+      <div id="invoiceSection"></div>
+
       <table id="claimsTable">
-        <thead><tr><th>대상</th><th>상태</th><th>청구금액</th><th>제출일시</th><th>파일</th></tr></thead>
+        <thead><tr><th>대상</th><th>상태</th><th>청구금액 / 확정금액</th><th>제출일시</th><th>파일</th></tr></thead>
         <tbody id="claimsBody"></tbody>
       </table>
     </section>
@@ -708,7 +712,7 @@ async function renderRoundDetail(){
   document.getElementById('rd_due').textContent = round.claim_due_at ? new Date(round.claim_due_at).toLocaleString('ko-KR') : '미설정';
 
   const { data: claims } = await sb.from('claims')
-    .select('*, retailers(code,name), workshops(name)')
+    .select('*, retailers(code,name), workshops(name, biz_no)')
     .eq('round_id', currentRoundId)
     .order('created_at');
 
@@ -716,6 +720,7 @@ async function renderRoundDetail(){
   const submitted = claims?.filter(c => ['SUBMITTED','APPROVED'].includes(c.status)).length || 0;
   document.getElementById('rd_progress').textContent = total ? `${submitted} / ${total} 제출` : '대상 없음';
 
+  /* ---------- 상단 액션 ---------- */
   const actions = document.getElementById('rd_actions');
   actions.innerHTML = '';
   if(round.status === 'DRAFT'){
@@ -737,8 +742,109 @@ async function renderRoundDetail(){
       await renderRoundDetail();
     });
     actions.appendChild(btn);
+  } else if(round.status === 'CLOSED'){
+    const pending = (claims||[]).filter(c => c.status === 'SUBMITTED').length;
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="hint" style="margin-bottom:8px;">검토 대기 ${pending}건 남음 ${pending>0?'— 전부 승인/반송 처리 후 공지하세요.':''}</div>
+      <div class="row2" style="max-width:420px;">
+        <div class="field"><label>계산서 마감일시 (선택)</label><input type="datetime-local" id="rd_invoice_due"></div>
+      </div>
+      <button class="btn" id="confirmRoundBtn" style="margin-top:6px;">확정금액 공지 (세금계산서 요청)</button>
+    `;
+    actions.appendChild(wrap);
+    document.getElementById('confirmRoundBtn').addEventListener('click', () => confirmRound(round, type, claims));
+  } else if(round.status === 'CONFIRMED'){
+    const btn = document.createElement('button');
+    btn.className = 'btn'; btn.textContent = '계산서 전원 접수 확인 (완료 처리)';
+    btn.addEventListener('click', () => finalizeInvoices(round));
+    actions.appendChild(btn);
   }
 
+  /* ---------- 검토 섹션 (CLOSED일 때만) ---------- */
+  const reviewSection = document.getElementById('reviewSection');
+  reviewSection.innerHTML = '';
+  if(round.status === 'CLOSED'){
+    const pendingClaims = (claims||[]).filter(c => c.status === 'SUBMITTED');
+    if(pendingClaims.length > 0){
+      const card = document.createElement('div');
+      card.className = 'info-card';
+      card.innerHTML = `<div class="section-label" style="margin-top:0;">검토 대기 (${pendingClaims.length}건)</div>`;
+      const tbl = document.createElement('table');
+      tbl.innerHTML = `<thead><tr><th>대상</th><th>청구금액</th><th>확정금액</th><th>처리</th></tr></thead><tbody></tbody>`;
+      const tb = tbl.querySelector('tbody');
+      pendingClaims.forEach(c => {
+        const label = c.workshops ? `${c.retailers?.code} · ${c.workshops.name}` : (c.retailers?.name || c.retailers?.code);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${label}</td>
+          <td class="muted">${Number(c.claimed_amount||0).toLocaleString('ko-KR')}원</td>
+          <td><input type="text" inputmode="numeric" class="row-amt-input approve-amt-input" style="width:120px;" value="${Number(c.claimed_amount||0).toLocaleString('ko-KR')}"></td>
+          <td>
+            <button class="btn btn-sm approve-btn" data-id="${c.id}">승인</button>
+            <button class="btn btn-ghost btn-sm reject-btn" data-id="${c.id}" style="margin-left:6px;">반송</button>
+          </td>`;
+        tb.appendChild(tr);
+      });
+      card.appendChild(tbl);
+      reviewSection.appendChild(card);
+      card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+      card.querySelectorAll('.approve-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const input = btn.closest('tr').querySelector('.approve-amt-input');
+          const amount = readAmountInput(input);
+          if(amount == null){ alert('확정금액을 입력해주세요.'); return; }
+          const { error } = await sb.from('claims').update({ status:'APPROVED', approved_amount: amount }).eq('id', btn.dataset.id);
+          if(error){ alert('승인 실패: '+error.message); return; }
+          await renderRoundDetail();
+        });
+      });
+      card.querySelectorAll('.reject-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const reason = prompt('반송 사유를 입력해주세요:');
+          if(!reason) return;
+          const { error } = await sb.from('claims').update({ status:'REJECTED', reject_reason: reason }).eq('id', btn.dataset.id);
+          if(error){ alert('반송 실패: '+error.message); return; }
+          await renderRoundDetail();
+        });
+      });
+    }
+  }
+
+  /* ---------- 세금계산서 섹션 (CONFIRMED / INVOICED) ---------- */
+  const invoiceSection = document.getElementById('invoiceSection');
+  invoiceSection.innerHTML = '';
+  if(round.status === 'CONFIRMED' || round.status === 'INVOICED'){
+    const { data: invoices } = await sb.from('invoices')
+      .select('*, retailers(code,name)')
+      .eq('round_id', currentRoundId)
+      .order('biz_no');
+    const card = document.createElement('div');
+    card.className = 'info-card';
+    const accepted = (invoices||[]).filter(i => ['SUBMITTED','ACCEPTED'].includes(i.status)).length;
+    card.innerHTML = `<div class="section-label" style="margin-top:0;">세금계산서 접수 현황 (${accepted} / ${invoices?.length||0})</div>`;
+    const tbl = document.createElement('table');
+    tbl.innerHTML = `<thead><tr><th>리테일러</th><th>사업자번호</th><th>공급가액</th><th>제출 부가세</th><th>일치</th><th>파일</th></tr></thead><tbody></tbody>`;
+    const tb = tbl.querySelector('tbody');
+    (invoices||[]).forEach(inv => {
+      const expectedVat = Math.round((inv.supply_amount||0) * 0.10);
+      const matchBadge = inv.vat == null ? '—' : (inv.vat === expectedVat ? '<span class="badge badge-ap">일치</span>' : '<span class="badge badge-warn">확인필요</span>');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${inv.retailers?.code || ''}</td>
+        <td class="muted">${inv.biz_no}</td>
+        <td>${Number(inv.supply_amount||0).toLocaleString('ko-KR')}원</td>
+        <td>${inv.vat != null ? Number(inv.vat).toLocaleString('ko-KR')+'원' : '<span class="muted">미제출</span>'}</td>
+        <td>${matchBadge}</td>
+        <td>${inv.file_path ? `<span class="file-link" data-path="${inv.file_path}">다운로드</span>` : '—'}</td>`;
+      tb.appendChild(tr);
+    });
+    card.appendChild(tbl);
+    invoiceSection.appendChild(card);
+    card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+  }
+
+  /* ---------- 전체 청구 목록 (참고용) ---------- */
   const tbody = document.getElementById('claimsBody');
   tbody.innerHTML = '';
   if(!claims || claims.length === 0){
@@ -748,11 +854,14 @@ async function renderRoundDetail(){
   claims.forEach(c => {
     const label = c.workshops ? `${c.retailers?.code} · ${c.workshops.name}` : (c.retailers?.name || c.retailers?.code || '—');
     const statusBadge = c.status === 'NOT_SUBMITTED' ? 'badge-warn' : (c.status === 'REJECTED' ? 'badge-danger' : 'badge-ap');
+    const amountText = c.approved_amount != null
+      ? `${Number(c.approved_amount).toLocaleString('ko-KR')}원 <span class="hint">(확정)</span>`
+      : (c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—');
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${label}</td>
-      <td><span class="badge ${statusBadge}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span></td>
-      <td>${c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—'}</td>
+      <td><span class="badge ${statusBadge}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${c.reject_reason?`<div class="hint" style="color:var(--danger);">${c.reject_reason}</div>`:''}</td>
+      <td>${amountText}</td>
       <td class="muted">${c.submitted_at ? new Date(c.submitted_at).toLocaleString('ko-KR') : '—'}</td>
       <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}</td>`;
     tbody.appendChild(tr);
@@ -760,6 +869,59 @@ async function renderRoundDetail(){
   tbody.querySelectorAll('.file-link').forEach(el => {
     el.addEventListener('click', () => downloadFile(el.dataset.path));
   });
+}
+
+async function confirmRound(round, type, claims){
+  const pending = (claims||[]).filter(c => c.status === 'SUBMITTED').length;
+  const notSubmitted = (claims||[]).filter(c => c.status === 'NOT_SUBMITTED').length;
+  let msg = '확정금액을 공지하고 세금계산서 제출을 요청할까요?';
+  if(pending > 0) msg += `\n⚠️ 아직 검토 안 된 항목 ${pending}건이 있습니다 — 이 항목은 이번 확정에서 제외됩니다.`;
+  if(notSubmitted > 0) msg += `\n⚠️ 미제출 항목 ${notSubmitted}건은 0원으로 처리되어 계산서 대상에서 빠집니다.`;
+  if(!confirm(msg)) return;
+
+  const approved = (claims||[]).filter(c => c.status === 'APPROVED' && c.approved_amount != null);
+
+  // biz_no 별로 합산 (지점단위: workshop.biz_no / 법인단위: retailers.biz_no)
+  const groups = new Map(); // key: retailer_id|biz_no
+  const missingBizNo = [];
+  for(const c of approved){
+    const bizNo = type.claim_unit === 'WORKSHOP' ? c.workshops?.biz_no : null;
+    if(!bizNo){
+      missingBizNo.push(c);
+      continue;
+    }
+    const key = c.retailer_id + '|' + bizNo;
+    if(!groups.has(key)) groups.set(key, { retailer_id: c.retailer_id, biz_no: bizNo, supply_amount: 0 });
+    groups.get(key).supply_amount += Number(c.approved_amount);
+  }
+
+  if(missingBizNo.length > 0){
+    alert(`${missingBizNo.length}건은 사업자번호 정보가 없어 세금계산서 항목이 자동 생성되지 않았습니다. 지점 마스터에 biz_no를 채운 뒤 수동으로 처리해주세요.`);
+  }
+
+  if(groups.size > 0){
+    const invoiceRows = Array.from(groups.values()).map(g => ({
+      round_id: round.id, retailer_id: g.retailer_id, biz_no: g.biz_no, supply_amount: g.supply_amount, status:'PENDING'
+    }));
+    const { error: invErr } = await sb.from('invoices').insert(invoiceRows);
+    if(invErr){ alert('세금계산서 항목 생성 실패: ' + invErr.message); return; }
+  }
+
+  const invoiceDueInput = document.getElementById('rd_invoice_due');
+  const invoice_due_at = invoiceDueInput?.value ? new Date(invoiceDueInput.value).toISOString() : null;
+
+  const { error } = await sb.from('rounds').update({ status:'CONFIRMED', invoice_due_at }).eq('id', round.id);
+  if(error){ alert('확정 처리 실패: ' + error.message); return; }
+  await renderRoundDetail();
+}
+
+async function finalizeInvoices(round){
+  const { data: invoices } = await sb.from('invoices').select('status').eq('round_id', round.id);
+  const notReady = (invoices||[]).filter(i => i.status === 'PENDING').length;
+  if(notReady > 0 && !confirm(`아직 ${notReady}건이 계산서를 제출하지 않았습니다. 그래도 완료 처리할까요?`)) return;
+  const { error } = await sb.from('rounds').update({ status:'INVOICED' }).eq('id', round.id);
+  if(error){ alert('처리 실패: '+error.message); return; }
+  await renderRoundDetail();
 }
 
 async function openRound(round, type){
@@ -819,9 +981,11 @@ async function loadRetailerClaims(){
     groups.get(c.round_id).push(c);
   });
 
-  groups.forEach((items) => {
+  for(const items of groups.values()){
     const round = items[0].rounds;
-    const editable = round.status === 'OPEN' && (!round.claim_due_at || new Date(round.claim_due_at) > new Date());
+    const withinDeadline = round.status === 'OPEN' && (!round.claim_due_at || new Date(round.claim_due_at) > new Date());
+    const hasRejected = items.some(c => c.status === 'REJECTED');
+    const showUploadArea = withinDeadline || hasRejected;
     const card = document.createElement('div');
     card.className = 'claim-card';
 
@@ -830,27 +994,32 @@ async function loadRetailerClaims(){
       <div class="claim-head">
         <div>
           <div class="claim-name">${round.settlement_types?.name || ''} · ${round.period_label}</div>
-          <div class="claim-sub">마감 ${dueStr} · 대상 ${items.length}건</div>
+          <div class="claim-sub">마감 ${dueStr} · 대상 ${items.length}건 · <span class="badge ${round.status==='OPEN'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
         </div>
       </div>`;
 
-    if(editable){
+    if(showUploadArea){
       const hasCancelled = items.some(c => c.status === 'NOT_SUBMITTED');
       const hasSubmitted = items.some(c => ['SUBMITTED','APPROVED'].includes(c.status));
+      let noticeHtml = '';
+      if(hasCancelled && hasSubmitted) noticeHtml = '※ 제출취소한 지점이 있습니다 — 새 청구서 파일을 업로드하면 해당 지점 금액이 다시 채워집니다.';
+      if(hasRejected) noticeHtml = '※ 반송된 지점이 있습니다 — 사유를 확인하고 새 청구서 파일로 재제출해주세요.';
       bodyHtml += `
         <div class="field" style="margin-bottom:14px;">
           <label>청구서 엑셀 업로드 (지점별 라인이 있으면 자동으로 아래 금액에 채워집니다)</label>
           <input type="file" class="group-file-input" accept=".xlsx,.xls">
-          <div class="hint group-parse-hint">${(hasCancelled && hasSubmitted) ? '※ 제출취소한 지점이 있습니다 — 새 청구서 파일을 업로드하면 해당 지점 금액이 다시 채워집니다.' : ''}</div>
+          <div class="hint group-parse-hint">${noticeHtml}</div>
         </div>`;
     }
 
     bodyHtml += `<table style="margin-top:4px;"><thead><tr><th>지점</th><th>상태</th><th>청구금액</th><th></th></tr></thead><tbody>`;
     items.forEach(c => {
       const label = c.workshops ? c.workshops.name : (myRetailer?.name || '법인 전체');
-      const rowEditable = editable && ['NOT_SUBMITTED','REJECTED'].includes(c.status);
-      const canCancel = editable && c.status === 'SUBMITTED';
-      const amountText = c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—';
+      const rowEditable = c.status === 'REJECTED' || (withinDeadline && c.status === 'NOT_SUBMITTED');
+      const canCancel = withinDeadline && c.status === 'SUBMITTED';
+      const amountText = c.approved_amount != null
+        ? `${Number(c.approved_amount).toLocaleString('ko-KR')}원 <span class="hint">(확정)</span>`
+        : (c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—');
       let amountCell;
       if(rowEditable){
         amountCell = `<div style="display:flex; gap:6px; align-items:center;">
@@ -880,7 +1049,7 @@ async function loadRetailerClaims(){
       </tr></tfoot>
       </table>`;
 
-    if(editable){
+    if(showUploadArea){
       bodyHtml += `<div class="action-row"><button class="btn btn-sm group-submit-btn">전체 제출</button></div>`;
     }
 
@@ -948,7 +1117,73 @@ async function loadRetailerClaims(){
     card.querySelectorAll('.file-link').forEach(el => {
       el.addEventListener('click', () => downloadFile(el.dataset.path));
     });
-  });
+
+    /* ---------- 세금계산서 제출 (확정 공지 이후) ---------- */
+    if(round.status === 'CONFIRMED' || round.status === 'INVOICED'){
+      const { data: myInvoices } = await sb.from('invoices')
+        .select('*').eq('round_id', round.id).eq('retailer_id', myRetailer.id).order('biz_no');
+      if(myInvoices && myInvoices.length > 0){
+        const invCard = document.createElement('div');
+        invCard.style.marginTop = '14px';
+        invCard.innerHTML = `<div class="section-label" style="margin-top:0;">세금계산서 제출 대상 (${myInvoices.length}건)</div>`;
+        const invTbl = document.createElement('table');
+        invTbl.innerHTML = `<thead><tr><th>사업자번호</th><th>공급가액</th><th>부가세</th><th>계산서 파일</th><th></th></tr></thead><tbody></tbody>`;
+        const invTb = invTbl.querySelector('tbody');
+        myInvoices.forEach(inv => {
+          const invEditable = inv.status !== 'ACCEPTED' && round.status === 'CONFIRMED' && (!round.invoice_due_at || new Date(round.invoice_due_at) > new Date());
+          const tr = document.createElement('tr');
+          tr.dataset.invoiceId = inv.id;
+          if(invEditable){
+            const expectedVat = Math.round((inv.supply_amount||0) * 0.10);
+            tr.innerHTML = `
+              <td class="muted">${inv.biz_no}</td>
+              <td>${Number(inv.supply_amount||0).toLocaleString('ko-KR')}원</td>
+              <td><input type="text" inputmode="numeric" class="row-amt-input inv-vat-input" style="width:110px;" value="${inv.vat!=null?Number(inv.vat).toLocaleString('ko-KR'):Number(expectedVat).toLocaleString('ko-KR')}"></td>
+              <td><input type="file" class="inv-file-input" accept=".pdf,.jpg,.png"></td>
+              <td><button class="btn btn-sm inv-submit-btn">제출</button></td>`;
+          } else {
+            tr.innerHTML = `
+              <td class="muted">${inv.biz_no}</td>
+              <td>${Number(inv.supply_amount||0).toLocaleString('ko-KR')}원</td>
+              <td>${inv.vat!=null?Number(inv.vat).toLocaleString('ko-KR')+'원':'—'}</td>
+              <td>${inv.file_path?`<span class="file-link" data-path="${inv.file_path}">파일보기</span>`:'—'}</td>
+              <td><span class="badge ${inv.status==='ACCEPTED'?'badge-ap':'badge-warn'}">${inv.status==='ACCEPTED'?'접수완료':'제출됨'}</span></td>`;
+          }
+          invTb.appendChild(tr);
+        });
+        invCard.appendChild(invTbl);
+        card.appendChild(invCard);
+        invCard.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+        invCard.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+        invCard.querySelectorAll('.inv-submit-btn').forEach(btn => {
+          btn.addEventListener('click', () => submitInvoice(btn.closest('tr')));
+        });
+      }
+    }
+  }
+}
+
+async function submitInvoice(rowEl){
+  const invoiceId = rowEl.dataset.invoiceId;
+  const vatInput = rowEl.querySelector('.inv-vat-input');
+  const fileInput = rowEl.querySelector('.inv-file-input');
+  const vat = readAmountInput(vatInput);
+  const file = fileInput.files[0];
+  if(vat == null){ alert('부가세 금액을 입력해주세요.'); return; }
+  if(!file){ alert('세금계산서 파일을 첨부해주세요.'); return; }
+
+  const { data: inv } = await sb.from('invoices').select('supply_amount, retailer_id, round_id').eq('id', invoiceId).single();
+  const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+  const filePath = `${inv.retailer_id}/${inv.round_id}/INVOICE-${invoiceId}-${safeName}`;
+  const { error: upErr } = await sb.storage.from('settlements').upload(filePath, file, { upsert:true });
+  if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
+
+  const total_amount = Number(inv.supply_amount||0) + vat;
+  const { error } = await sb.from('invoices').update({
+    vat, total_amount, file_path: filePath, status:'SUBMITTED', submitted_at: new Date().toISOString()
+  }).eq('id', invoiceId);
+  if(error){ alert('제출 실패: ' + error.message); return; }
+  await loadRetailerClaims();
 }
 
 async function submitGroup(card, items, file){
