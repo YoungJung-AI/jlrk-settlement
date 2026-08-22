@@ -851,7 +851,10 @@ async function loadRetailerClaims(){
         <td>${label}</td>
         <td><span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${c.reject_reason?`<div class="hint" style="color:var(--danger);">${c.reject_reason}</div>`:''}</td>
         <td>${rowEditable
-            ? `<input type="text" inputmode="numeric" class="row-amt-input" style="width:130px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">`
+            ? `<div style="display:flex; gap:6px; align-items:center;">
+                 <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">
+                 <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
+               </div>`
             : (c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—')}
         </td>
         <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">파일보기</span>` : ''}</td>
@@ -875,6 +878,15 @@ async function loadRetailerClaims(){
     card.querySelectorAll('.row-amt-input').forEach(el => {
       formatAmountInput(el);
       el.addEventListener('input', () => updateGroupTotal(card));
+    });
+    card.querySelectorAll('.zero-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const input = btn.previousElementSibling;
+        const rowLabel = btn.closest('tr')?.children[0]?.textContent || '해당 지점';
+        if(!confirm(`${rowLabel} — 이번 회차에 정말 청구금액이 없습니까? 0원으로 제출됩니다.`)) return;
+        input.value = '0';
+        updateGroupTotal(card);
+      });
     });
     updateGroupTotal(card);
 
