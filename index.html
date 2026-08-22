@@ -130,6 +130,7 @@
     border-radius:6px; padding:7px 10px; font-size:13.5px; font-family:inherit;
   }
   .row-amt-input:focus{ outline:none; border-color:var(--accent); }
+  tfoot td{ border-top:2px solid var(--border); font-weight:700; background:var(--surface2); padding:11px 14px; font-size:13.5px; }
 </style>
 </head>
 <body>
@@ -362,6 +363,22 @@ function formatAmountInput(el){
 function readAmountInput(el){
   const n = parseInt(el.value.replace(/[^\d]/g, ''), 10);
   return isNaN(n) ? null : n;
+}
+function updateGroupTotal(card){
+  let sum = 0;
+  card.querySelectorAll('tbody tr').forEach(rowEl => {
+    const input = rowEl.querySelector('.row-amt-input');
+    if(input){
+      const v = readAmountInput(input);
+      if(v) sum += v;
+    } else {
+      const cell = rowEl.children[2];
+      const v = parseInt(String(cell?.textContent||'').replace(/[^\d]/g,''), 10);
+      if(!isNaN(v)) sum += v;
+    }
+  });
+  const totalEl = card.querySelector('.group-total-value');
+  if(totalEl) totalEl.textContent = sum.toLocaleString('ko-KR') + '원';
 }
 
 /* ---------- 엑셀 청구서 파싱 ----------
@@ -840,7 +857,13 @@ async function loadRetailerClaims(){
         <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">파일보기</span>` : ''}</td>
       </tr>`;
     });
-    bodyHtml += `</tbody></table>`;
+    bodyHtml += `</tbody>
+      <tfoot><tr>
+        <td colspan="2" style="text-align:right;">합계</td>
+        <td class="group-total-value">0원</td>
+        <td></td>
+      </tr></tfoot>
+      </table>`;
 
     if(editable){
       bodyHtml += `<div class="action-row"><button class="btn btn-sm group-submit-btn">전체 제출</button></div>`;
@@ -849,7 +872,11 @@ async function loadRetailerClaims(){
     card.innerHTML = bodyHtml;
     listEl.appendChild(card);
 
-    card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+    card.querySelectorAll('.row-amt-input').forEach(el => {
+      formatAmountInput(el);
+      el.addEventListener('input', () => updateGroupTotal(card));
+    });
+    updateGroupTotal(card);
 
     const fileInput = card.querySelector('.group-file-input');
     const hintEl = card.querySelector('.group-parse-hint');
@@ -872,6 +899,7 @@ async function loadRetailerClaims(){
             if(rowEl){ rowEl.value = Number(p.amount).toLocaleString('ko-KR'); matched++; }
           });
           hintEl.textContent = `${parsed.length}개 라인 중 ${matched}개 지점 자동 매칭 완료. 금액을 확인한 뒤 제출해주세요.`;
+          updateGroupTotal(card);
         } catch(e){
           hintEl.textContent = '엑셀을 읽지 못했습니다: ' + e.message;
         }
