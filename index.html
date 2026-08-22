@@ -230,7 +230,7 @@
       <div id="invoiceSection"></div>
 
       <table id="claimsTable">
-        <thead><tr><th>대상</th><th>상태</th><th>청구금액 / 확정금액</th><th>제출일시</th><th>파일</th></tr></thead>
+        <thead><tr><th>대상</th><th>상태</th><th>청구금액</th><th>확정금액</th><th>제출일시</th><th>파일</th></tr></thead>
         <tbody id="claimsBody"></tbody>
       </table>
     </section>
@@ -771,15 +771,18 @@ async function renderRoundDetail(){
       card.className = 'info-card';
       card.innerHTML = `<div class="section-label" style="margin-top:0;">검토 대기 (${pendingClaims.length}건)</div>`;
       const tbl = document.createElement('table');
-      tbl.innerHTML = `<thead><tr><th>대상</th><th>청구금액</th><th>확정금액</th><th>처리</th></tr></thead><tbody></tbody>`;
+      tbl.innerHTML = `<thead><tr><th>대상</th><th>청구금액</th><th>확정/제안금액</th><th>반송 사유 (반송 시 필수)</th><th>첨부파일 (선택)</th><th>처리</th></tr></thead><tbody></tbody>`;
       const tb = tbl.querySelector('tbody');
       pendingClaims.forEach(c => {
         const label = c.workshops ? `${c.retailers?.code} · ${c.workshops.name}` : (c.retailers?.name || c.retailers?.code);
         const tr = document.createElement('tr');
+        tr.dataset.claimId = c.id;
         tr.innerHTML = `
           <td>${label}</td>
           <td class="muted">${Number(c.claimed_amount||0).toLocaleString('ko-KR')}원</td>
-          <td><input type="text" inputmode="numeric" class="row-amt-input approve-amt-input" style="width:120px;" value="${Number(c.claimed_amount||0).toLocaleString('ko-KR')}"></td>
+          <td><input type="text" inputmode="numeric" class="row-amt-input review-amt-input" style="width:110px;" value="${Number(c.claimed_amount||0).toLocaleString('ko-KR')}"></td>
+          <td><input type="text" class="review-reason-input" style="width:140px;" placeholder="예: 부품번호 오기재"></td>
+          <td><input type="file" class="review-file-input" style="font-size:11px; width:130px;"></td>
           <td>
             <button class="btn btn-sm approve-btn" data-id="${c.id}">승인</button>
             <button class="btn btn-ghost btn-sm reject-btn" data-id="${c.id}" style="margin-left:6px;">반송</button>
@@ -791,8 +794,8 @@ async function renderRoundDetail(){
       card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
       card.querySelectorAll('.approve-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
-          const input = btn.closest('tr').querySelector('.approve-amt-input');
-          const amount = readAmountInput(input);
+          const row = btn.closest('tr');
+          const amount = readAmountInput(row.querySelector('.review-amt-input'));
           if(amount == null){ alert('확정금액을 입력해주세요.'); return; }
           const { error } = await sb.from('claims').update({ status:'APPROVED', approved_amount: amount }).eq('id', btn.dataset.id);
           if(error){ alert('승인 실패: '+error.message); return; }
@@ -800,13 +803,7 @@ async function renderRoundDetail(){
         });
       });
       card.querySelectorAll('.reject-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const reason = prompt('반송 사유를 입력해주세요:');
-          if(!reason) return;
-          const { error } = await sb.from('claims').update({ status:'REJECTED', reject_reason: reason }).eq('id', btn.dataset.id);
-          if(error){ alert('반송 실패: '+error.message); return; }
-          await renderRoundDetail();
-        });
+        btn.addEventListener('click', () => rejectClaim(btn.closest('tr')));
       });
     }
   }
@@ -848,20 +845,20 @@ async function renderRoundDetail(){
   const tbody = document.getElementById('claimsBody');
   tbody.innerHTML = '';
   if(!claims || claims.length === 0){
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">개설 전이라 대상이 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">개설 전이라 대상이 없습니다.</td></tr>';
     return;
   }
   claims.forEach(c => {
     const label = c.workshops ? `${c.retailers?.code} · ${c.workshops.name}` : (c.retailers?.name || c.retailers?.code || '—');
     const statusBadge = c.status === 'NOT_SUBMITTED' ? 'badge-warn' : (c.status === 'REJECTED' ? 'badge-danger' : 'badge-ap');
-    const amountText = c.approved_amount != null
-      ? `${Number(c.approved_amount).toLocaleString('ko-KR')}원 <span class="hint">(확정)</span>`
-      : (c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—');
+    const claimedText = c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—';
+    const approvedText = c.approved_amount != null ? Number(c.approved_amount).toLocaleString('ko-KR')+'원' : '—';
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${label}</td>
       <td><span class="badge ${statusBadge}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${c.reject_reason?`<div class="hint" style="color:var(--danger);">${c.reject_reason}</div>`:''}</td>
-      <td>${amountText}</td>
+      <td>${claimedText}</td>
+      <td>${approvedText}</td>
       <td class="muted">${c.submitted_at ? new Date(c.submitted_at).toLocaleString('ko-KR') : '—'}</td>
       <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}</td>`;
     tbody.appendChild(tr);
@@ -869,6 +866,34 @@ async function renderRoundDetail(){
   tbody.querySelectorAll('.file-link').forEach(el => {
     el.addEventListener('click', () => downloadFile(el.dataset.path));
   });
+}
+
+async function rejectClaim(rowEl){
+  const claimId = rowEl.dataset.claimId;
+  const reason = rowEl.querySelector('.review-reason-input').value.trim();
+  if(!reason){ alert('반송 사유를 입력해주세요.'); return; }
+  const suggestedAmount = readAmountInput(rowEl.querySelector('.review-amt-input'));
+  const file = rowEl.querySelector('.review-file-input').files[0];
+
+  const { data: claimRow } = await sb.from('claims').select('retailer_id, round_id, detail').eq('id', claimId).single();
+
+  let adminFilePath = claimRow?.detail?.admin_file_path || null;
+  if(file){
+    const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    // 리테일러 본인 폴더 밑에 저장해야 리테일러가 나중에 다운로드할 수 있음
+    adminFilePath = `${claimRow.retailer_id}/${claimRow.round_id}/ADMIN-${claimId}-${Date.now()}-${safeName}`;
+    const { error: upErr } = await sb.storage.from('settlements').upload(adminFilePath, file, { upsert:true });
+    if(upErr){ alert('첨부파일 업로드 실패: ' + upErr.message); return; }
+  }
+
+  const payload = {
+    status:'REJECTED', reject_reason: reason, approved_amount: null,
+    detail: { ...(claimRow?.detail || {}), admin_suggested_amount: suggestedAmount, admin_file_path: adminFilePath }
+  };
+
+  const { error } = await sb.from('claims').update(payload).eq('id', claimId);
+  if(error){ alert('반송 실패: ' + error.message); return; }
+  await renderRoundDetail();
 }
 
 async function confirmRound(round, type, claims){
@@ -1015,13 +1040,26 @@ async function loadRetailerClaims(){
     bodyHtml += `<table style="margin-top:4px;"><thead><tr><th>지점</th><th>상태</th><th>청구금액</th><th></th></tr></thead><tbody>`;
     items.forEach(c => {
       const label = c.workshops ? c.workshops.name : (myRetailer?.name || '법인 전체');
-      const rowEditable = c.status === 'REJECTED' || (withinDeadline && c.status === 'NOT_SUBMITTED');
+      const isRejected = c.status === 'REJECTED';
+      const rowEditable = !isRejected && withinDeadline && c.status === 'NOT_SUBMITTED';
       const canCancel = withinDeadline && c.status === 'SUBMITTED';
       const amountText = c.approved_amount != null
         ? `${Number(c.approved_amount).toLocaleString('ko-KR')}원 <span class="hint">(확정)</span>`
         : (c.claimed_amount!=null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—');
       let amountCell;
-      if(rowEditable){
+      if(isRejected){
+        const suggested = c.detail?.admin_suggested_amount;
+        amountCell = `<div style="display:flex; flex-direction:column; gap:6px;">
+             <div style="display:flex; gap:6px; align-items:center;">
+               <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${suggested!=null?Number(suggested).toLocaleString('ko-KR'):(c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):'')}">
+               <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
+             </div>
+             <div style="display:flex; gap:6px; align-items:center;">
+               <input type="file" class="row-file-input" style="font-size:11px; max-width:150px;">
+               <button type="button" class="btn btn-sm resubmit-btn" data-claim-id="${c.id}" style="padding:6px 10px; font-size:11px;">재청구</button>
+             </div>
+           </div>`;
+      } else if(rowEditable){
         amountCell = `<div style="display:flex; gap:6px; align-items:center;">
              <input type="text" inputmode="numeric" class="row-amt-input" style="width:110px;" value="${c.claimed_amount!=null?Number(c.claimed_amount).toLocaleString('ko-KR'):''}">
              <button type="button" class="btn btn-ghost zero-btn" style="padding:6px 9px; font-size:11px;">청구없음</button>
@@ -1034,9 +1072,14 @@ async function loadRetailerClaims(){
       } else {
         amountCell = amountText;
       }
+      const statusExtra = [
+        c.reject_reason ? `<div class="hint" style="color:var(--danger);">사유: ${c.reject_reason}</div>` : '',
+        c.detail?.admin_suggested_amount != null ? `<div class="hint">관리자 제안금액: ${Number(c.detail.admin_suggested_amount).toLocaleString('ko-KR')}원</div>` : '',
+        c.detail?.admin_file_path ? `<div class="hint"><span class="file-link" data-path="${c.detail.admin_file_path}">관리자 첨부파일 확인</span></div>` : ''
+      ].join('');
       bodyHtml += `<tr data-claim-id="${c.id}" data-workshop-code="${c.workshops?.code||''}">
         <td>${label}</td>
-        <td><span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${c.reject_reason?`<div class="hint" style="color:var(--danger);">${c.reject_reason}</div>`:''}</td>
+        <td><span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>${statusExtra}</td>
         <td>${amountCell}</td>
         <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">파일보기</span>` : ''}</td>
       </tr>`;
@@ -1076,6 +1119,26 @@ async function loadRetailerClaims(){
           status: 'NOT_SUBMITTED', submitted_at: null, claimed_amount: null, file_path: null
         }).eq('id', btn.dataset.claimId);
         if(error){ alert('취소 실패: ' + error.message); return; }
+        await loadRetailerClaims();
+      });
+    });
+    card.querySelectorAll('.resubmit-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const row = btn.closest('tr');
+        const amount = readAmountInput(row.querySelector('.row-amt-input'));
+        if(amount == null){ alert('청구금액을 입력해주세요.'); return; }
+        const file = row.querySelector('.row-file-input').files[0];
+        let filePath;
+        if(file){
+          const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+          filePath = `${items[0].retailer_id}/${round.id}/${btn.dataset.claimId}-${Date.now()}-${safeName}`;
+          const { error: upErr } = await sb.storage.from('settlements').upload(filePath, file, { upsert:true });
+          if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
+        }
+        const payload = { claimed_amount: amount, status:'SUBMITTED', submitted_at: new Date().toISOString() };
+        if(filePath) payload.file_path = filePath;
+        const { error } = await sb.from('claims').update(payload).eq('id', btn.dataset.claimId);
+        if(error){ alert('재청구 실패: ' + error.message); return; }
         await loadRetailerClaims();
       });
     });
