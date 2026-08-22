@@ -1074,7 +1074,8 @@ async function stripExternalDefinedNames(buffer){
   const file = zip.file(path);
   if(!file) return buffer;
   let xml = await file.async('string');
-  xml = xml.replace(/<definedName\b[^>]*>[^<]*<\/definedName>/g, (m) => (/\[\d+\]/.test(m) ? '' : m));
+  // [숫자] 형태(외부링크 인덱스)뿐 아니라 [파일명.xls] 같은 직접 외부참조도 전부 제거
+  xml = xml.replace(/<definedName\b[^>]*>[^<]*<\/definedName>/g, (m) => (/\[[^\]]*\]/.test(m) ? '' : m));
   zip.file(path, xml);
   return await zip.generateAsync({ type: 'arraybuffer' });
 }
@@ -1091,14 +1092,35 @@ function cellRefToRC(ref){
 }
 
 // 엑셀 표지 시트를 HTML 표로 재구성해 캡처 → PDF 1페이지로 저장 (엑셀을 못 여는 환경에서도 표지 그대로 보이게)
-async function buildCoverPdfBlob(coverSheet){
+// 원본 xlsx의 workbook.xml을 직접 읽어 시트별 인쇄영역(Print_Area)을 정확히 가져옴
+// (ExcelJS의 pageSetup.printArea는 로드 시 항상 채워지는 게 아니라서 이 방식이 더 확실함)
+async function getPrintAreaFromTemplate(buffer, sheetName){
+  try{
+    const zip = await JSZip.loadAsync(buffer);
+    const xmlFile = zip.file('xl/workbook.xml');
+    if(!xmlFile) return null;
+    const xml = await xmlFile.async('string');
+    const sheetsBlock = xml.match(/<sheets>(.*?)<\/sheets>/s);
+    if(!sheetsBlock) return null;
+    const sheetOrder = [];
+    const sheetRe = /<sheet\b[^>]*\bname="([^"]*)"[^>]*\/>/g;
+    let sm;
+    while((sm = sheetRe.exec(sheetsBlock[1]))) sheetOrder.push(sm[1]);
+    const idx = sheetOrder.indexOf(sheetName);
+    if(idx === -1) return null;
+    const paRe = new RegExp(`<definedName name="_xlnm\\.Print_Area" localSheetId="${idx}">([^<]*)</definedName>`);
+    const paMatch = xml.match(paRe);
+    if(!paMatch) return null;
+    let range = paMatch[1].replace(/&apos;/g, "'").replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+    if(range.includes('!')) range = range.split('!')[1];
+    return range.replace(/\$/g, '');
+  } catch(e){ console.error('printArea 파싱 실패', e); return null; }
+}
+
+async function buildCoverPdfBlob(coverSheet, printAreaRange){
   let dims = coverSheet.dimensions;
-  // 엑셀에 지정된 인쇄영역(Print_Area)이 있으면 그 범위만 캡처
-  const printArea = coverSheet.pageSetup?.printArea;
-  if(printArea){
-    const first = printArea.split(',')[0].trim();
-    const cleaned = first.includes('!') ? first.split('!')[1] : first;
-    const [startRefRaw, endRefRaw] = cleaned.replace(/\$/g, '').split(':');
+  if(printAreaRange){
+    const [startRefRaw, endRefRaw] = printAreaRange.split(':');
     if(startRefRaw){
       const s = cellRefToRC(startRefRaw);
       const e = endRefRaw ? cellRefToRC(endRefRaw) : s;
@@ -1165,14 +1187,14 @@ async function buildCoverPdfBlob(coverSheet){
 
   let pdfBlob = null;
   try{
-    const canvas = await html2canvas(table, { scale: 2, backgroundColor: '#ffffff' });
+    const canvas = await html2canvas(table, { scale: 1.5, backgroundColor: '#ffffff' });
     const { jsPDF } = window.jspdf;
-    const imgData = canvas.toDataURL('image/png');
+    const imgData = canvas.toDataURL('image/jpeg', 0.85); // PNG(무압축) 대신 JPEG로 용량 대폭 축소
     const pdf = new jsPDF({
       orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
       unit: 'px', format: [canvas.width, canvas.height]
     });
-    pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+    pdf.addImage(imgData, 'JPEG', 0, 0, canvas.width, canvas.height);
     pdfBlob = pdf.output('blob');
   } finally {
     document.body.removeChild(wrapper);
@@ -1472,7 +1494,11 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
 
     // ---- 표지 PDF: 엑셀 표지 시트를 그대로 캡처해서 1페이지 PDF로 ----
     setProgress('표지 PDF를 만드는 중...');
-    const pdfBlob = coverSheet ? await buildCoverPdfBlob(coverSheet) : null;
+    let pdfBlob = null;
+    if(coverSheet){
+      const printAreaRange = await getPrintAreaFromTemplate(tplBuffer, 'AP without PO');
+      pdfBlob = await buildCoverPdfBlob(coverSheet, printAreaRange);
+    }
 
     // ---- 파일명 통일 ----
     const periodSafe = sanitizeFilename(round.period_label);
