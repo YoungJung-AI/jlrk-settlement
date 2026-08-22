@@ -1274,11 +1274,23 @@ async function submitInvoice(round, supplyAmount, rowEl){
   if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
 
   const total_amount = Number(supplyAmount||0) + vat;
-  const { error } = await sb.from('invoices').upsert({
+  const payload = {
     round_id: round.id, retailer_id: myRetailer.id,
     supply_amount: supplyAmount, vat, total_amount, file_path: filePath,
     status: 'SUBMITTED', submitted_at: new Date().toISOString()
-  }, { onConflict: 'round_id,retailer_id' });
+  };
+
+  // upsert 대신 존재 여부를 먼저 확인해 insert/update를 명시적으로 분기
+  const { data: existing, error: findErr } = await sb.from('invoices')
+    .select('id').eq('round_id', round.id).eq('retailer_id', myRetailer.id).maybeSingle();
+  if(findErr){ alert('조회 실패: ' + findErr.message); return; }
+
+  let error;
+  if(existing){
+    ({ error } = await sb.from('invoices').update(payload).eq('id', existing.id));
+  } else {
+    ({ error } = await sb.from('invoices').insert(payload));
+  }
   if(error){ alert('제출 실패: ' + error.message); return; }
   await loadRetailerClaims();
 }
