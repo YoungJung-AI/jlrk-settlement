@@ -809,7 +809,7 @@ async function renderRoundDetail(){
     }
   }
 
-  /* ---------- 세금계산서 섹션 (CONFIRMED / INVOICED) — 리테일러 단위 1건, 실시간 승인현황 계산 ---------- */
+  /* ---------- 세금계산서 섹션 (CONFIRMED / INVOICED) — 리테일러 단위 1건, 제출현황을 실시간 계산 ---------- */
   const invoiceSection = document.getElementById('invoiceSection');
   invoiceSection.innerHTML = '';
   if(round.status === 'CONFIRMED' || round.status === 'INVOICED'){
@@ -819,24 +819,28 @@ async function renderRoundDetail(){
 
     const card = document.createElement('div');
     card.className = 'info-card';
-    const readyCount = summary.filter(g => g.approved === g.total).length;
-    card.innerHTML = `<div class="section-label" style="margin-top:0;">세금계산서 접수 현황 (승인완료 ${readyCount} / ${summary.length}건)</div>`;
+    const submittedCount = (invoiceRows||[]).filter(i => ['SUBMITTED','ACCEPTED'].includes(i.status)).length;
+    card.innerHTML = `<div class="section-label" style="margin-top:0;">세금계산서 접수 현황 (제출완료 ${submittedCount} / ${summary.length}건)</div>`;
     if(summary.length === 0){
       card.innerHTML += '<div class="hint">승인 대상이 아직 없습니다.</div>';
     } else {
       const tbl = document.createElement('table');
-      tbl.innerHTML = `<thead><tr><th>리테일러</th><th>승인현황</th><th>공급가액</th><th>제출 부가세</th><th>일치</th><th>파일</th></tr></thead><tbody></tbody>`;
+      tbl.innerHTML = `<thead><tr><th>리테일러</th><th>제출현황</th><th>공급가액</th><th>제출 부가세</th><th>부가세 검산</th><th>파일</th></tr></thead><tbody></tbody>`;
       const tb = tbl.querySelector('tbody');
       summary.forEach(g => {
         const inv = invByRetailer.get(g.retailer_id);
         const ready = g.approved === g.total;
-        const readyBadge = ready ? '<span class="badge badge-ap">승인완료</span>' : `<span class="badge badge-warn">${g.approved}/${g.total} 승인</span>`;
+        let statusBadge;
+        if(!ready) statusBadge = `<span class="badge badge-off">검토중 (${g.approved}/${g.total} 승인)</span>`;
+        else if(!inv) statusBadge = '<span class="badge badge-warn">미제출</span>';
+        else if(inv.status === 'ACCEPTED') statusBadge = '<span class="badge badge-ap">접수완료</span>';
+        else statusBadge = '<span class="badge badge-ap">제출됨</span>';
         const expectedVat = Math.round((g.supply_amount||0) * 0.10);
-        const matchBadge = !inv || inv.vat == null ? '—' : (inv.vat === expectedVat ? '<span class="badge badge-ap">일치</span>' : '<span class="badge badge-warn">확인필요</span>');
+        const matchBadge = !inv || inv.vat == null ? '—' : (inv.vat === expectedVat ? '<span class="badge badge-ap">10% 일치</span>' : '<span class="badge badge-warn">확인필요</span>');
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${g.retailerCode || ''}</td>
-          <td>${readyBadge}</td>
+          <td>${statusBadge}</td>
           <td>${ready ? Number(g.supply_amount).toLocaleString('ko-KR')+'원' : '<span class="muted">검토중</span>'}</td>
           <td>${inv?.vat != null ? Number(inv.vat).toLocaleString('ko-KR')+'원' : '<span class="muted">미제출</span>'}</td>
           <td>${matchBadge}</td>
@@ -844,6 +848,11 @@ async function renderRoundDetail(){
         tb.appendChild(tr);
       });
       card.appendChild(tbl);
+      const note = document.createElement('div');
+      note.className = 'hint';
+      note.style.marginTop = '8px';
+      note.textContent = '※ "부가세 검산"은 제출된 부가세 숫자가 공급가액의 10%와 맞는지 계산만 확인합니다. 파일 실제 내용(사업자번호·금액) 검증은 아직 자동화되지 않았습니다.';
+      card.appendChild(note);
     }
     invoiceSection.appendChild(card);
     card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
@@ -1225,7 +1234,7 @@ async function loadRetailerClaims(){
       if(!ready){
         invCard.innerHTML += '<div class="hint">전체 지점이 승인되면 계산서 업로드가 열립니다.</div>';
       } else {
-        const invEditable = (!myInvoice || myInvoice.status !== 'ACCEPTED') && round.status === 'CONFIRMED' && (!round.invoice_due_at || new Date(round.invoice_due_at) > new Date());
+        const invEditable = !myInvoice && round.status === 'CONFIRMED' && (!round.invoice_due_at || new Date(round.invoice_due_at) > new Date());
         const wrap = document.createElement('div');
         if(invEditable){
           const expectedVat = Math.round(supplyAmount * 0.10);
