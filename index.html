@@ -813,7 +813,7 @@ async function renderRoundDetail(){
   const invoiceSection = document.getElementById('invoiceSection');
   invoiceSection.innerHTML = '';
   if(round.status === 'CONFIRMED' || round.status === 'INVOICED'){
-    const summary = buildRetailerSummary(claims);
+    const summary = buildRetailerSummary(claims).filter(g => g.approved === g.total && g.total > 0);
     const { data: invoiceRows } = await sb.from('invoices').select('*').eq('round_id', currentRoundId);
     const invByRetailer = new Map((invoiceRows||[]).map(i => [i.retailer_id, i]));
 
@@ -822,17 +822,15 @@ async function renderRoundDetail(){
     const submittedCount = (invoiceRows||[]).filter(i => ['SUBMITTED','ACCEPTED'].includes(i.status)).length;
     card.innerHTML = `<div class="section-label" style="margin-top:0;">세금계산서 접수 현황 (제출완료 ${submittedCount} / ${summary.length}건)</div>`;
     if(summary.length === 0){
-      card.innerHTML += '<div class="hint">승인 대상이 아직 없습니다.</div>';
+      card.innerHTML += '<div class="hint">전체 승인 완료된 리테일러가 아직 없습니다.</div>';
     } else {
       const tbl = document.createElement('table');
       tbl.innerHTML = `<thead><tr><th>리테일러</th><th>제출현황</th><th>공급가액</th><th>제출 부가세</th><th>부가세 검산</th><th>파일</th></tr></thead><tbody></tbody>`;
       const tb = tbl.querySelector('tbody');
       summary.forEach(g => {
         const inv = invByRetailer.get(g.retailer_id);
-        const ready = g.approved === g.total;
         let statusBadge;
-        if(!ready) statusBadge = `<span class="badge badge-off">검토중 (${g.approved}/${g.total} 승인)</span>`;
-        else if(!inv) statusBadge = '<span class="badge badge-warn">미제출</span>';
+        if(!inv) statusBadge = '<span class="badge badge-warn">미제출</span>';
         else if(inv.status === 'ACCEPTED') statusBadge = '<span class="badge badge-ap">접수완료</span>';
         else statusBadge = '<span class="badge badge-ap">제출됨</span>';
         const expectedVat = Math.round((g.supply_amount||0) * 0.10);
@@ -841,7 +839,7 @@ async function renderRoundDetail(){
         tr.innerHTML = `
           <td>${g.retailerCode || ''}</td>
           <td>${statusBadge}</td>
-          <td>${ready ? Number(g.supply_amount).toLocaleString('ko-KR')+'원' : '<span class="muted">검토중</span>'}</td>
+          <td>${Number(g.supply_amount).toLocaleString('ko-KR')}원</td>
           <td>${inv?.vat != null ? Number(inv.vat).toLocaleString('ko-KR')+'원' : '<span class="muted">미제출</span>'}</td>
           <td>${matchBadge}</td>
           <td>${inv?.file_path ? `<span class="file-link" data-path="${inv.file_path}">다운로드</span>` : '—'}</td>`;
