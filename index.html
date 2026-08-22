@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JLRK 정산 포털 — 정산 유형 관리</title>
+<title>JLRK 정산 포털</title>
 <style>
   :root{
     --bg:#14171c; --surface:#1a1e25; --surface2:#20252d; --surface3:#262c36;
     --border:#2c3340; --border-soft:#232933;
     --text:#e7eaee; --text-mid:#aab2c0; --text-dim:#6b7383;
-    --accent:#2f9e78;      /* AP 지원금 지급 */
-    --accent-ar:#d99a3d;   /* AR 청구 */
+    --accent:#2f9e78;      /* AP 지원금 지급 / 정상 */
+    --accent-ar:#d99a3d;   /* AR 청구 / 주의 */
     --danger:#e0616b;
     --radius:8px;
     font-family:"Aptos","Malgun Gothic","맑은 고딕",-apple-system,sans-serif;
@@ -19,60 +19,44 @@
   body{background:var(--bg); color:var(--text); font-size:14px; line-height:1.5;}
 
   /* ---------- Login ---------- */
-  #loginScreen{
-    min-height:100vh; display:flex; align-items:center; justify-content:center;
-  }
-  .login-card{
-    width:340px; background:var(--surface); border:1px solid var(--border);
-    border-radius:var(--radius); padding:32px;
-  }
+  #loginScreen{ min-height:100vh; display:flex; align-items:center; justify-content:center; }
+  .login-card{ width:340px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:32px; }
   .login-eyebrow{ font-size:11px; letter-spacing:.12em; color:var(--text-dim); text-transform:uppercase; margin-bottom:6px;}
   .login-title{ font-size:19px; font-weight:600; margin-bottom:24px; }
   .field{ margin-bottom:14px; }
   .field label{ display:block; font-size:12px; color:var(--text-mid); margin-bottom:6px; }
   .field input, .field select, .field textarea{
     width:100%; background:var(--surface2); border:1px solid var(--border);
-    color:var(--text); border-radius:6px; padding:9px 11px; font-size:14px;
-    font-family:inherit;
+    color:var(--text); border-radius:6px; padding:9px 11px; font-size:14px; font-family:inherit;
   }
-  .field input:focus, .field select:focus, .field textarea:focus{
-    outline:none; border-color:var(--accent);
-  }
+  .field input:focus, .field select:focus, .field textarea:focus{ outline:none; border-color:var(--accent); }
   .btn{
     display:inline-flex; align-items:center; justify-content:center; gap:6px;
     background:var(--accent); color:#0b1410; border:none; border-radius:6px;
-    padding:10px 16px; font-size:13.5px; font-weight:600; cursor:pointer;
-    font-family:inherit; transition:opacity .15s;
+    padding:10px 16px; font-size:13.5px; font-weight:600; cursor:pointer; font-family:inherit; transition:opacity .15s;
   }
   .btn:hover{ opacity:.88; }
   .btn:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
   .btn-block{ width:100%; }
-  .btn-ghost{
-    background:transparent; color:var(--text-mid); border:1px solid var(--border);
-  }
+  .btn-ghost{ background:transparent; color:var(--text-mid); border:1px solid var(--border); }
   .btn-ghost:hover{ color:var(--text); border-color:var(--text-dim); }
   .btn-danger{ background:transparent; color:var(--danger); border:1px solid rgba(224,97,107,.4); }
+  .btn-sm{ padding:6px 12px; font-size:12.5px; }
   #loginError{ color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px; }
 
   /* ---------- Shell ---------- */
   #app{ display:none; min-height:100vh; grid-template-columns:220px 1fr; grid-template-rows:56px 1fr;}
   #app.active{ display:grid; }
-  header{
-    grid-column:1/3; display:flex; align-items:center; justify-content:space-between;
-    padding:0 20px; border-bottom:1px solid var(--border-soft); background:var(--surface);
-  }
+  #app.retailer-mode{ grid-template-columns:1fr; }
+  header{ grid-column:1/3; display:flex; align-items:center; justify-content:space-between; padding:0 20px; border-bottom:1px solid var(--border-soft); background:var(--surface); }
+  #app.retailer-mode header{ grid-column:1/2; }
   .brand{ display:flex; align-items:baseline; gap:8px; }
   .brand-mark{ font-weight:700; font-size:14px; letter-spacing:.02em; }
   .brand-sub{ font-size:12px; color:var(--text-dim); }
   .who{ display:flex; align-items:center; gap:12px; font-size:12.5px; color:var(--text-mid); }
 
-  nav{
-    border-right:1px solid var(--border-soft); padding:16px 10px; background:var(--surface);
-  }
-  nav .nav-item{
-    display:block; padding:9px 12px; border-radius:6px; font-size:13.5px;
-    color:var(--text-mid); margin-bottom:2px; cursor:pointer;
-  }
+  nav{ border-right:1px solid var(--border-soft); padding:16px 10px; background:var(--surface); }
+  nav .nav-item{ display:block; padding:9px 12px; border-radius:6px; font-size:13.5px; color:var(--text-mid); margin-bottom:2px; cursor:pointer; }
   nav .nav-item.active{ background:var(--surface3); color:var(--text); }
   nav .nav-item.disabled{ color:var(--text-dim); cursor:default; }
 
@@ -80,49 +64,49 @@
   .page-head{ display:flex; align-items:baseline; justify-content:space-between; margin-bottom:18px; }
   .page-title{ font-size:18px; font-weight:600; }
   .page-desc{ font-size:12.5px; color:var(--text-dim); margin-top:4px; }
+  .back-link{ display:inline-block; font-size:12.5px; color:var(--text-mid); cursor:pointer; margin-bottom:14px; }
+  .back-link:hover{ color:var(--text); }
 
   table{ width:100%; border-collapse:collapse; background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); overflow:hidden; }
-  thead th{
-    text-align:left; font-size:11.5px; color:var(--text-dim); font-weight:600;
-    text-transform:uppercase; letter-spacing:.04em; padding:10px 14px;
-    border-bottom:1px solid var(--border-soft); background:var(--surface2);
-  }
+  thead th{ text-align:left; font-size:11.5px; color:var(--text-dim); font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding:10px 14px; border-bottom:1px solid var(--border-soft); background:var(--surface2); }
   tbody td{ padding:11px 14px; border-bottom:1px solid var(--border-soft); font-size:13.5px; }
   tbody tr:last-child td{ border-bottom:none; }
-  tbody tr:hover{ background:var(--surface2); cursor:pointer; }
-  .badge{ display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+  tbody tr.clickable:hover{ background:var(--surface2); cursor:pointer; }
+  .badge{ display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; white-space:nowrap; }
   .badge-ap{ background:rgba(47,158,120,.15); color:var(--accent); }
   .badge-ar{ background:rgba(217,154,61,.15); color:var(--accent-ar); }
   .badge-off{ background:var(--surface3); color:var(--text-dim); }
+  .badge-warn{ background:rgba(217,154,61,.15); color:var(--accent-ar); }
+  .badge-danger{ background:rgba(224,97,107,.15); color:var(--danger); }
   .muted{ color:var(--text-dim); }
-  .empty-state{
-    text-align:center; padding:60px 20px; color:var(--text-dim); font-size:13px;
-    border:1px dashed var(--border); border-radius:var(--radius);
-  }
+  .empty-state{ text-align:center; padding:60px 20px; color:var(--text-dim); font-size:13px; border:1px dashed var(--border); border-radius:var(--radius); }
 
-  /* ---------- Slide-over form ---------- */
-  #overlay{
-    display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:40;
-  }
+  .stat-row{ display:flex; gap:10px; margin-bottom:18px; }
+  .stat-card{ flex:1; background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:14px 16px; }
+  .stat-num{ font-size:22px; font-weight:700; }
+  .stat-label{ font-size:11.5px; color:var(--text-dim); margin-top:2px; }
+
+  .info-card{ background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:18px 20px; margin-bottom:18px; }
+  .info-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:14px; margin-top:12px; }
+  .info-item .k{ font-size:11px; color:var(--text-dim); margin-bottom:3px; }
+  .info-item .v{ font-size:14px; font-weight:600; }
+  .action-row{ display:flex; gap:8px; margin-top:16px; }
+
+  /* ---------- Slide-over panel ---------- */
+  #overlay{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:40; }
   #overlay.active{ display:block; }
-  #panel{
+  .panel{
     position:fixed; top:0; right:0; height:100vh; width:480px; max-width:92vw;
     background:var(--surface); border-left:1px solid var(--border); z-index:41;
     transform:translateX(100%); transition:transform .22s ease; display:flex; flex-direction:column;
   }
-  #panel.active{ transform:translateX(0); }
-  .panel-head{
-    padding:18px 22px; border-bottom:1px solid var(--border-soft); display:flex;
-    align-items:center; justify-content:space-between;
-  }
+  .panel.active{ transform:translateX(0); }
+  .panel-head{ padding:18px 22px; border-bottom:1px solid var(--border-soft); display:flex; align-items:center; justify-content:space-between; }
   .panel-title{ font-size:15px; font-weight:600; }
   .panel-close{ background:none; border:none; color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;}
   .panel-body{ padding:20px 22px; overflow-y:auto; flex:1; }
   .panel-foot{ padding:16px 22px; border-top:1px solid var(--border-soft); display:flex; gap:8px; }
-  .section-label{
-    font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-dim);
-    margin:20px 0 10px; font-weight:600;
-  }
+  .section-label{ font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-dim); margin:20px 0 10px; font-weight:600; }
   .section-label:first-child{ margin-top:0; }
   .row2{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .check-row{ display:flex; align-items:center; gap:8px; margin-bottom:10px; }
@@ -130,11 +114,17 @@
   .check-row label{ font-size:13px; color:var(--text); margin:0; }
   .hint{ font-size:11.5px; color:var(--text-dim); margin-top:4px; }
   .chip-list{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
-  .chip{
-    font-size:11.5px; padding:4px 9px; border-radius:20px; background:var(--surface3);
-    color:var(--text-mid); cursor:pointer; border:1px solid transparent; user-select:none;
-  }
+  .chip{ font-size:11.5px; padding:4px 9px; border-radius:20px; background:var(--surface3); color:var(--text-mid); cursor:pointer; border:1px solid transparent; user-select:none; }
   .chip.selected{ background:rgba(47,158,120,.16); color:var(--accent); border-color:rgba(47,158,120,.4); }
+
+  /* ---------- Retailer view ---------- */
+  .claim-card{ background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:16px 18px; margin-bottom:12px; }
+  .claim-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .claim-name{ font-size:14px; font-weight:600; }
+  .claim-sub{ font-size:11.5px; color:var(--text-dim); margin-top:2px; }
+  .claim-form{ display:grid; grid-template-columns:1fr 1fr auto; gap:8px; align-items:end; margin-top:10px; }
+  .claim-form .field{ margin-bottom:0; }
+  .file-link{ color:var(--accent); text-decoration:underline; cursor:pointer; font-size:12.5px; }
 </style>
 </head>
 <body>
@@ -162,55 +152,103 @@
   <header>
     <div class="brand">
       <span class="brand-mark">JLRK 정산 포털</span>
-      <span class="brand-sub">Settlement Portal</span>
+      <span class="brand-sub" id="brandSub">Settlement Portal</span>
     </div>
     <div class="who">
       <span id="whoEmail"></span>
-      <button class="btn btn-ghost" id="logoutBtn" style="padding:6px 12px;">로그아웃</button>
+      <button class="btn btn-ghost btn-sm" id="logoutBtn">로그아웃</button>
     </div>
   </header>
 
-  <nav>
-    <div class="nav-item active" data-nav="types">정산 유형 관리</div>
-    <div class="nav-item disabled">회차 관리</div>
+  <nav id="adminNav">
+    <div class="nav-item" data-nav="types">정산 유형 관리</div>
+    <div class="nav-item" data-nav="rounds">회차 관리</div>
     <div class="nav-item disabled">검토</div>
     <div class="nav-item disabled">바우처 생성</div>
     <div class="nav-item disabled">리테일러 관리</div>
   </nav>
 
   <main>
-    <div class="page-head">
-      <div>
-        <div class="page-title">정산 유형</div>
-        <div class="page-desc">월/분기 단위로 반복되는 정산 종류를 등록합니다. 회차 개설 시 여기서 만든 유형을 선택합니다.</div>
-      </div>
-      <button class="btn" id="newTypeBtn">+ 새 유형</button>
-    </div>
 
-    <table id="typesTable">
-      <thead>
-        <tr>
-          <th>코드</th><th>유형명</th><th>방향</th><th>주기</th><th>청구단위</th><th>대상</th><th>상태</th>
-        </tr>
-      </thead>
-      <tbody id="typesBody"></tbody>
-    </table>
-    <div id="emptyState" class="empty-state" style="display:none; margin-top:12px;">
-      아직 등록된 정산 유형이 없습니다. [+ 새 유형]으로 첫 유형을 만들어보세요.
-    </div>
+    <!-- ===== 정산 유형 관리 ===== -->
+    <section id="view-types">
+      <div class="page-head">
+        <div>
+          <div class="page-title">정산 유형</div>
+          <div class="page-desc">월/분기 단위로 반복되는 정산 종류를 등록합니다. 회차 개설 시 여기서 만든 유형을 선택합니다.</div>
+        </div>
+        <button class="btn" id="newTypeBtn">+ 새 유형</button>
+      </div>
+      <table id="typesTable">
+        <thead><tr><th>코드</th><th>유형명</th><th>방향</th><th>주기</th><th>청구단위</th><th>대상</th><th>상태</th></tr></thead>
+        <tbody id="typesBody"></tbody>
+      </table>
+      <div id="typesEmpty" class="empty-state" style="display:none; margin-top:12px;">
+        아직 등록된 정산 유형이 없습니다. [+ 새 유형]으로 첫 유형을 만들어보세요.
+      </div>
+    </section>
+
+    <!-- ===== 회차 목록 ===== -->
+    <section id="view-rounds" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">회차 관리</div>
+          <div class="page-desc">정산 유형을 선택해 실제 청구 회차를 엽니다. 회차를 클릭하면 제출 현황을 볼 수 있습니다.</div>
+        </div>
+        <button class="btn" id="newRoundBtn">+ 새 회차</button>
+      </div>
+      <table id="roundsTable">
+        <thead><tr><th>기간</th><th>유형</th><th>방향</th><th>상태</th><th>청구 마감</th><th>제출 현황</th></tr></thead>
+        <tbody id="roundsBody"></tbody>
+      </table>
+      <div id="roundsEmpty" class="empty-state" style="display:none; margin-top:12px;">
+        아직 개설된 회차가 없습니다. [+ 새 회차]로 만들어보세요.
+      </div>
+    </section>
+
+    <!-- ===== 회차 상세 (제출 현황판) ===== -->
+    <section id="view-roundDetail" style="display:none;">
+      <span class="back-link" id="backToRounds">← 회차 목록으로</span>
+      <div class="info-card">
+        <div class="page-title" id="rd_title">—</div>
+        <div class="info-grid">
+          <div class="info-item"><div class="k">상태</div><div class="v" id="rd_status">—</div></div>
+          <div class="info-item"><div class="k">방향 / 청구단위</div><div class="v" id="rd_meta">—</div></div>
+          <div class="info-item"><div class="k">청구 마감</div><div class="v" id="rd_due">—</div></div>
+          <div class="info-item"><div class="k">제출 현황</div><div class="v" id="rd_progress">—</div></div>
+        </div>
+        <div class="action-row" id="rd_actions"></div>
+      </div>
+      <table id="claimsTable">
+        <thead><tr><th>대상</th><th>상태</th><th>청구금액</th><th>제출일시</th><th>파일</th></tr></thead>
+        <tbody id="claimsBody"></tbody>
+      </table>
+    </section>
+
+    <!-- ===== 리테일러 화면 ===== -->
+    <section id="view-retailer" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">내 청구</div>
+          <div class="page-desc">진행 중인 정산 건을 확인하고 청구서를 제출합니다.</div>
+        </div>
+      </div>
+      <div id="retailerList"></div>
+      <div id="retailerEmpty" class="empty-state" style="display:none;">현재 진행 중인 청구 건이 없습니다.</div>
+    </section>
+
   </main>
 </div>
 
-<!-- ============ 슬라이드 패널 (생성/수정) ============ -->
+<!-- ============ 슬라이드 패널: 정산 유형 ============ -->
 <div id="overlay"></div>
-<div id="panel">
+<div id="typePanel" class="panel">
   <div class="panel-head">
-    <div class="panel-title" id="panelTitle">새 정산 유형</div>
-    <button class="panel-close" id="panelClose">&times;</button>
+    <div class="panel-title" id="typePanelTitle">새 정산 유형</div>
+    <button class="panel-close" data-close-panel="typePanel">&times;</button>
   </div>
   <div class="panel-body">
     <input type="hidden" id="f_id">
-
     <div class="section-label">기본</div>
     <div class="row2">
       <div class="field"><label>유형코드</label><input id="f_code" placeholder="예: RECALL_UPSELL"></div>
@@ -225,23 +263,15 @@
 
     <div class="section-label">주기 · 청구 단위</div>
     <div class="row2">
-      <div class="field"><label>주기</label>
-        <select id="f_period"><option value="QUARTERLY">분기</option><option value="MONTHLY">월</option></select>
-      </div>
-      <div class="field"><label>청구 단위</label>
-        <select id="f_claim_unit"><option value="RETAILER">법인 단위</option><option value="WORKSHOP">지점 단위</option></select>
-      </div>
+      <div class="field"><label>주기</label><select id="f_period"><option value="QUARTERLY">분기</option><option value="MONTHLY">월</option></select></div>
+      <div class="field"><label>청구 단위</label><select id="f_claim_unit"><option value="RETAILER">법인 단위</option><option value="WORKSHOP">지점 단위</option></select></div>
     </div>
     <div class="hint">세금계산서는 항상 사업자번호(biz_no) 단위로 발행됩니다 — 청구 단위와 별개로 자동 롤업됩니다.</div>
 
     <div class="section-label">마감 규칙</div>
     <div class="row2">
       <div class="field"><label>기준</label>
-        <select id="f_due_anchor">
-          <option value="next_month">익월</option>
-          <option value="same_month">당월</option>
-          <option value="quarter_end">분기말 익월</option>
-        </select>
+        <select id="f_due_anchor"><option value="next_month">익월</option><option value="same_month">당월</option><option value="quarter_end">분기말 익월</option></select>
       </div>
       <div class="field"><label>일자 / 시각</label>
         <div style="display:flex; gap:6px;">
@@ -255,20 +285,14 @@
 
     <div class="section-label">금액 처리</div>
     <div class="row2">
-      <div class="field"><label>부가세</label>
-        <select id="f_vat_included"><option value="false">별도</option><option value="true">포함</option></select>
-      </div>
-      <div class="field"><label>절사 방식</label>
-        <select id="f_rounding"><option value="FLOOR">원단위 절사</option><option value="ROUND">반올림</option><option value="CEIL">원단위 올림</option></select>
-      </div>
+      <div class="field"><label>부가세</label><select id="f_vat_included"><option value="false">별도</option><option value="true">포함</option></select></div>
+      <div class="field"><label>절사 방식</label><select id="f_rounding"><option value="FLOOR">원단위 절사</option><option value="ROUND">반올림</option><option value="CEIL">원단위 올림</option></select></div>
     </div>
     <div class="field"><label>상한액 (선택)</label><input id="f_amount_cap" type="number" placeholder="없으면 비워두기"></div>
 
     <div class="section-label">알림</div>
     <div class="row2">
-      <div class="field"><label>발송 방식</label>
-        <select id="f_notify"><option value="INSTANT">즉시</option><option value="DAILY_DIGEST">일 1회 요약</option></select>
-      </div>
+      <div class="field"><label>발송 방식</label><select id="f_notify"><option value="INSTANT">즉시</option><option value="DAILY_DIGEST">일 1회 요약</option></select></div>
       <div class="field"><label>리마인더 (D-n, 쉼표구분)</label><input id="f_reminder_days" placeholder="3,1"></div>
     </div>
 
@@ -280,9 +304,29 @@
     <div class="check-row"><input type="checkbox" id="f_is_active" checked><label for="f_is_active">활성 (회차 개설 시 목록에 노출)</label></div>
   </div>
   <div class="panel-foot">
-    <button class="btn" id="saveBtn" style="flex:1;">저장</button>
-    <button class="btn btn-ghost" id="cancelBtn">취소</button>
-    <button class="btn btn-danger" id="deleteBtn" style="display:none;">비활성화</button>
+    <button class="btn" id="saveTypeBtn" style="flex:1;">저장</button>
+    <button class="btn btn-ghost" data-close-panel="typePanel">취소</button>
+    <button class="btn btn-danger" id="deleteTypeBtn" style="display:none;">비활성화</button>
+  </div>
+</div>
+
+<!-- ============ 슬라이드 패널: 새 회차 ============ -->
+<div id="roundPanel" class="panel">
+  <div class="panel-head">
+    <div class="panel-title">새 회차 개설</div>
+    <button class="panel-close" data-close-panel="roundPanel">&times;</button>
+  </div>
+  <div class="panel-body">
+    <div class="field"><label>정산 유형</label>
+      <select id="r_type_id"></select>
+    </div>
+    <div class="field"><label>기간 라벨</label><input id="r_period_label" placeholder="예: FY27 Q1"></div>
+    <div class="field"><label>청구 마감일시</label><input id="r_claim_due_at" type="datetime-local"></div>
+    <div class="hint">개설(리테일러 공개)은 목록에서 회차를 만든 뒤, 상세화면에서 별도로 진행합니다.</div>
+  </div>
+  <div class="panel-foot">
+    <button class="btn" id="saveRoundBtn" style="flex:1;">회차 만들기 (DRAFT)</button>
+    <button class="btn btn-ghost" data-close-panel="roundPanel">취소</button>
   </div>
 </div>
 
@@ -296,9 +340,15 @@ const SUPABASE_ANON_KEY = "sb_publishable_FfntgS9kX9mVfW7E_sBA7A_l8VX5nDA";
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+let myProfile = null;
 let retailers = [];
 let selectedRetailerIds = new Set();
-let editingId = null;
+let editingTypeId = null;
+let activeTypes = [];
+let currentRoundId = null;
+
+const CLAIM_STATUS_LABEL = { NOT_SUBMITTED:'미제출', SUBMITTED:'제출됨', REJECTED:'반송', APPROVED:'승인', CANCELLED:'취소' };
+const ROUND_STATUS_LABEL = { DRAFT:'준비중', OPEN:'접수중', CLOSED:'검토중', CONFIRMED:'확정공지', INVOICED:'계산서접수', VOUCHERED:'완료', PUBLISHED:'공지됨', FINALIZED:'확정', ARCHIVED:'종료' };
 
 /* ---------- 로그인 ---------- */
 const loginScreen = document.getElementById('loginScreen');
@@ -315,19 +365,30 @@ function showLogin(){
 }
 
 async function enterApp(session){
-  // 관리자 권한 확인
-  const { data: profile, error } = await sb.from('profiles').select('role, display_name').eq('id', session.user.id).single();
-  if(error || !profile || profile.role !== 'ADMIN'){
-    document.getElementById('loginError').textContent = '관리자 계정이 아닙니다.';
+  const { data: profile, error } = await sb.from('profiles').select('role, display_name, retailer_id').eq('id', session.user.id).single();
+  if(error || !profile){
+    document.getElementById('loginError').textContent = '계정 설정이 완료되지 않았습니다. 관리자에게 문의하세요.';
     await sb.auth.signOut();
     showLogin();
     return;
   }
+  myProfile = profile;
   loginScreen.style.display = 'none';
   app.classList.add('active');
   document.getElementById('whoEmail').textContent = profile.display_name || session.user.email;
-  await loadRetailers();
-  await loadTypes();
+
+  if(profile.role === 'ADMIN'){
+    document.getElementById('brandSub').textContent = 'Settlement Portal · Admin';
+    app.classList.remove('retailer-mode');
+    document.getElementById('adminNav').style.display = 'block';
+    await loadRetailers();
+    switchView('types');
+  } else {
+    document.getElementById('brandSub').textContent = 'Settlement Portal · Retailer';
+    app.classList.add('retailer-mode');
+    document.getElementById('adminNav').style.display = 'none';
+    switchView('retailer');
+  }
 }
 
 document.getElementById('loginBtn').addEventListener('click', async () => {
@@ -345,7 +406,35 @@ document.getElementById('logoutBtn').addEventListener('click', async () => {
   showLogin();
 });
 
-/* ---------- 리테일러 로드 (대상 선택 칩) ---------- */
+/* ---------- 뷰 전환 (관리자) ---------- */
+function switchView(name){
+  document.querySelectorAll('main > section').forEach(s => s.style.display = 'none');
+  document.getElementById('view-' + name).style.display = 'block';
+  document.querySelectorAll('#adminNav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.nav === name));
+  if(name === 'types') loadTypes();
+  if(name === 'rounds') loadRounds();
+  if(name === 'retailer') loadRetailerClaims();
+}
+document.querySelectorAll('#adminNav .nav-item[data-nav]').forEach(item => {
+  item.addEventListener('click', () => switchView(item.dataset.nav));
+});
+document.getElementById('backToRounds').addEventListener('click', () => switchView('rounds'));
+
+/* ---------- 패널 공통 ---------- */
+const overlay = document.getElementById('overlay');
+function openPanel(id){ overlay.classList.add('active'); document.getElementById(id).classList.add('active'); }
+function closePanel(id){ overlay.classList.remove('active'); document.getElementById(id).classList.remove('active'); }
+document.querySelectorAll('[data-close-panel]').forEach(btn => {
+  btn.addEventListener('click', () => closePanel(btn.dataset.closePanel));
+});
+overlay.addEventListener('click', () => {
+  document.querySelectorAll('.panel.active').forEach(p => p.classList.remove('active'));
+  overlay.classList.remove('active');
+});
+
+/* ================================================================
+   정산 유형 관리 (Phase 1)
+   ================================================================ */
 async function loadRetailers(){
   const { data, error } = await sb.from('retailers').select('id, code, name').eq('is_active', true).order('code');
   if(error){ console.error(error); return; }
@@ -365,43 +454,35 @@ async function loadRetailers(){
   });
 }
 
-/* ---------- 목록 로드 ---------- */
 async function loadTypes(){
   const { data, error } = await sb.from('settlement_types').select('*').order('created_at', { ascending:false });
   const tbody = document.getElementById('typesBody');
-  const emptyState = document.getElementById('emptyState');
+  const emptyState = document.getElementById('typesEmpty');
   tbody.innerHTML = '';
   if(error){ console.error(error); return; }
+  activeTypes = (data||[]).filter(t => t.is_active);
   if(!data || data.length === 0){ emptyState.style.display='block'; document.getElementById('typesTable').style.display='none'; return; }
   emptyState.style.display='none'; document.getElementById('typesTable').style.display='table';
 
   data.forEach(t => {
     const tr = document.createElement('tr');
-    tr.addEventListener('click', () => openPanel(t));
-    const targetLabel = (!t.target_retailers || t.target_retailers.length === 0)
-      ? '전체' : `${t.target_retailers.length}개사`;
+    tr.className = 'clickable';
+    tr.addEventListener('click', () => openTypePanel(t));
+    const targetLabel = (!t.target_retailers || t.target_retailers.length === 0) ? '전체' : `${t.target_retailers.length}개사`;
     tr.innerHTML = `
-      <td class="muted">${t.code}</td>
-      <td>${t.name}</td>
+      <td class="muted">${t.code}</td><td>${t.name}</td>
       <td><span class="badge ${t.direction==='AP'?'badge-ap':'badge-ar'}">${t.direction}</span></td>
-      <td>${t.period==='MONTHLY'?'월':'분기'}</td>
-      <td>${t.claim_unit==='RETAILER'?'법인':'지점'}</td>
+      <td>${t.period==='MONTHLY'?'월':'분기'}</td><td>${t.claim_unit==='RETAILER'?'법인':'지점'}</td>
       <td>${targetLabel}</td>
-      <td>${t.is_active ? '<span class="badge badge-ap">활성</span>' : '<span class="badge badge-off">비활성</span>'}</td>
-    `;
+      <td>${t.is_active ? '<span class="badge badge-ap">활성</span>' : '<span class="badge badge-off">비활성</span>'}</td>`;
     tbody.appendChild(tr);
   });
 }
 
-/* ---------- 패널 열기/닫기 ---------- */
-const overlay = document.getElementById('overlay');
-const panel = document.getElementById('panel');
-
-function openPanel(t){
-  editingId = t ? t.id : null;
-  document.getElementById('panelTitle').textContent = t ? '정산 유형 수정' : '새 정산 유형';
-  document.getElementById('deleteBtn').style.display = t ? 'inline-flex' : 'none';
-
+function openTypePanel(t){
+  editingTypeId = t ? t.id : null;
+  document.getElementById('typePanelTitle').textContent = t ? '정산 유형 수정' : '새 정산 유형';
+  document.getElementById('deleteTypeBtn').style.display = t ? 'inline-flex' : 'none';
   document.getElementById('f_id').value = t?.id || '';
   document.getElementById('f_code').value = t?.code || '';
   document.getElementById('f_name').value = t?.name || '';
@@ -419,31 +500,15 @@ function openPanel(t){
   document.getElementById('f_notify').value = t?.notify || 'INSTANT';
   document.getElementById('f_reminder_days').value = (t?.reminder_days || [3,1]).join(',');
   document.getElementById('f_is_active').checked = t ? !!t.is_active : true;
-
   selectedRetailerIds = new Set(t?.target_retailers || []);
-  document.querySelectorAll('#retailerChips .chip').forEach(chip => {
-    chip.classList.toggle('selected', selectedRetailerIds.has(chip.dataset.id));
-  });
-
-  overlay.classList.add('active');
-  panel.classList.add('active');
+  document.querySelectorAll('#retailerChips .chip').forEach(chip => chip.classList.toggle('selected', selectedRetailerIds.has(chip.dataset.id)));
+  openPanel('typePanel');
 }
 
-function closePanel(){
-  overlay.classList.remove('active');
-  panel.classList.remove('active');
-}
+document.getElementById('newTypeBtn').addEventListener('click', () => openTypePanel(null));
 
-document.getElementById('newTypeBtn').addEventListener('click', () => openPanel(null));
-document.getElementById('panelClose').addEventListener('click', closePanel);
-document.getElementById('cancelBtn').addEventListener('click', closePanel);
-overlay.addEventListener('click', closePanel);
-
-/* ---------- 저장 ---------- */
-document.getElementById('saveBtn').addEventListener('click', async () => {
-  const reminderDays = document.getElementById('f_reminder_days').value
-    .split(',').map(s => parseInt(s.trim(),10)).filter(n => !isNaN(n));
-
+document.getElementById('saveTypeBtn').addEventListener('click', async () => {
+  const reminderDays = document.getElementById('f_reminder_days').value.split(',').map(s => parseInt(s.trim(),10)).filter(n => !isNaN(n));
   const payload = {
     code: document.getElementById('f_code').value.trim(),
     name: document.getElementById('f_name').value.trim(),
@@ -465,33 +530,252 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
     target_retailers: selectedRetailerIds.size ? Array.from(selectedRetailerIds) : null,
     is_active: document.getElementById('f_is_active').checked
   };
+  if(!payload.code || !payload.name){ alert('유형코드와 유형명은 필수입니다.'); return; }
+  let error;
+  if(editingTypeId){ ({ error } = await sb.from('settlement_types').update(payload).eq('id', editingTypeId)); }
+  else { ({ error } = await sb.from('settlement_types').insert(payload)); }
+  if(error){ alert('저장 실패: ' + error.message); return; }
+  closePanel('typePanel');
+  await loadTypes();
+});
 
-  if(!payload.code || !payload.name){
-    alert('유형코드와 유형명은 필수입니다.');
+document.getElementById('deleteTypeBtn').addEventListener('click', async () => {
+  if(!editingTypeId) return;
+  if(!confirm('이 정산 유형을 비활성화할까요? (완전 삭제되지 않으며, 과거 회차 이력은 유지됩니다)')) return;
+  const { error } = await sb.from('settlement_types').update({ is_active:false }).eq('id', editingTypeId);
+  if(error){ alert('처리 실패: ' + error.message); return; }
+  closePanel('typePanel');
+  await loadTypes();
+});
+
+/* ================================================================
+   회차 관리 (Phase 2)
+   ================================================================ */
+async function loadRounds(){
+  const { data, error } = await sb.from('rounds')
+    .select('*, settlement_types(name, code, direction, claim_unit)')
+    .order('created_at', { ascending:false });
+  const tbody = document.getElementById('roundsBody');
+  const emptyState = document.getElementById('roundsEmpty');
+  tbody.innerHTML = '';
+  if(error){ console.error(error); return; }
+  if(!data || data.length === 0){ emptyState.style.display='block'; document.getElementById('roundsTable').style.display='none'; return; }
+  emptyState.style.display='none'; document.getElementById('roundsTable').style.display='table';
+
+  for(const r of data){
+    const { count: total } = await sb.from('claims').select('id', {count:'exact', head:true}).eq('round_id', r.id);
+    const { count: submitted } = await sb.from('claims').select('id', {count:'exact', head:true}).eq('round_id', r.id).in('status', ['SUBMITTED','APPROVED']);
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.addEventListener('click', () => openRoundDetail(r.id));
+    tr.innerHTML = `
+      <td>${r.period_label}</td>
+      <td class="muted">${r.settlement_types?.name || '—'}</td>
+      <td><span class="badge ${r.settlement_types?.direction==='AP'?'badge-ap':'badge-ar'}">${r.settlement_types?.direction||''}</span></td>
+      <td><span class="badge ${r.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[r.status]||r.status}</span></td>
+      <td class="muted">${r.claim_due_at ? new Date(r.claim_due_at).toLocaleString('ko-KR') : '—'}</td>
+      <td>${total ? `${submitted||0} / ${total}` : '—'}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+document.getElementById('newRoundBtn').addEventListener('click', () => {
+  const sel = document.getElementById('r_type_id');
+  sel.innerHTML = activeTypes.map(t => `<option value="${t.id}">${t.code} — ${t.name}</option>`).join('');
+  document.getElementById('r_period_label').value = '';
+  document.getElementById('r_claim_due_at').value = '';
+  if(activeTypes.length === 0){ alert('먼저 [정산 유형 관리]에서 유형을 하나 만들어야 합니다.'); return; }
+  openPanel('roundPanel');
+});
+
+document.getElementById('saveRoundBtn').addEventListener('click', async () => {
+  const type_id = document.getElementById('r_type_id').value;
+  const period_label = document.getElementById('r_period_label').value.trim();
+  const claim_due_at = document.getElementById('r_claim_due_at').value;
+  if(!type_id || !period_label){ alert('정산 유형과 기간 라벨은 필수입니다.'); return; }
+  const { error } = await sb.from('rounds').insert({
+    type_id, period_label,
+    claim_due_at: claim_due_at ? new Date(claim_due_at).toISOString() : null,
+    status: 'DRAFT'
+  });
+  if(error){ alert('생성 실패: ' + error.message); return; }
+  closePanel('roundPanel');
+  await loadRounds();
+});
+
+async function openRoundDetail(roundId){
+  currentRoundId = roundId;
+  switchView('roundDetail');
+  await renderRoundDetail();
+}
+
+async function renderRoundDetail(){
+  const { data: round, error } = await sb.from('rounds').select('*, settlement_types(*)').eq('id', currentRoundId).single();
+  if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
+  const type = round.settlement_types;
+
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  document.getElementById('rd_status').innerHTML = `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent = `${type.direction} · ${type.claim_unit==='RETAILER'?'법인단위':'지점단위'}`;
+  document.getElementById('rd_due').textContent = round.claim_due_at ? new Date(round.claim_due_at).toLocaleString('ko-KR') : '미설정';
+
+  const { data: claims } = await sb.from('claims')
+    .select('*, retailers(code,name), workshops(name)')
+    .eq('round_id', currentRoundId)
+    .order('created_at');
+
+  const total = claims?.length || 0;
+  const submitted = claims?.filter(c => ['SUBMITTED','APPROVED'].includes(c.status)).length || 0;
+  document.getElementById('rd_progress').textContent = total ? `${submitted} / ${total} 제출` : '대상 없음';
+
+  const actions = document.getElementById('rd_actions');
+  actions.innerHTML = '';
+  if(round.status === 'DRAFT'){
+    const btn = document.createElement('button');
+    btn.className = 'btn'; btn.textContent = '리테일러에게 청구 요청 시작 (개설)';
+    btn.addEventListener('click', () => openRound(round, type));
+    actions.appendChild(btn);
+    const hint = document.createElement('div');
+    hint.className = 'hint'; hint.style.marginTop='8px';
+    hint.textContent = '※ 이메일 자동 발송은 아직 연결되지 않았습니다 — 개설 후 별도로 리테일러에 안내해주세요.';
+    actions.appendChild(hint);
+  } else if(round.status === 'OPEN'){
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-danger'; btn.textContent = '지금 마감';
+    btn.addEventListener('click', async () => {
+      if(!confirm('마감하면 리테일러가 더 이상 제출할 수 없습니다. 계속할까요?')) return;
+      const { error } = await sb.from('rounds').update({status:'CLOSED'}).eq('id', round.id);
+      if(error){ alert('처리 실패: '+error.message); return; }
+      await renderRoundDetail();
+    });
+    actions.appendChild(btn);
+  }
+
+  const tbody = document.getElementById('claimsBody');
+  tbody.innerHTML = '';
+  if(!claims || claims.length === 0){
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">개설 전이라 대상이 없습니다.</td></tr>';
     return;
   }
+  claims.forEach(c => {
+    const label = c.workshops ? `${c.retailers?.code} · ${c.workshops.name}` : (c.retailers?.name || c.retailers?.code || '—');
+    const statusBadge = c.status === 'NOT_SUBMITTED' ? 'badge-warn' : (c.status === 'REJECTED' ? 'badge-danger' : 'badge-ap');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${label}</td>
+      <td><span class="badge ${statusBadge}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span></td>
+      <td>${c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—'}</td>
+      <td class="muted">${c.submitted_at ? new Date(c.submitted_at).toLocaleString('ko-KR') : '—'}</td>
+      <td>${c.file_path ? `<span class="file-link" data-path="${c.file_path}">다운로드</span>` : '—'}</td>`;
+    tbody.appendChild(tr);
+  });
+  tbody.querySelectorAll('.file-link').forEach(el => {
+    el.addEventListener('click', () => downloadFile(el.dataset.path));
+  });
+}
 
-  let error;
-  if(editingId){
-    ({ error } = await sb.from('settlement_types').update(payload).eq('id', editingId));
-  } else {
-    ({ error } = await sb.from('settlement_types').insert(payload));
+async function openRound(round, type){
+  if(!confirm(`${round.period_label} 회차를 개설할까요? 대상 리테일러/지점에 청구 항목이 생성됩니다.`)) return;
+
+  let targetRetailerIds = type.target_retailers;
+  if(!targetRetailerIds || targetRetailerIds.length === 0){
+    const { data: allRet } = await sb.from('retailers').select('id').eq('is_active', true);
+    targetRetailerIds = (allRet||[]).map(r => r.id);
   }
 
-  if(error){ alert('저장 실패: ' + error.message); return; }
-  closePanel();
-  await loadTypes();
-});
+  let claimRows = [];
+  if(type.claim_unit === 'WORKSHOP'){
+    const { data: ws } = await sb.from('workshops').select('id, retailer_id').eq('is_active', true).in('retailer_id', targetRetailerIds);
+    claimRows = (ws||[]).map(w => ({ round_id: round.id, retailer_id: w.retailer_id, workshop_id: w.id }));
+  } else {
+    claimRows = targetRetailerIds.map(rid => ({ round_id: round.id, retailer_id: rid }));
+  }
 
-/* ---------- 비활성화 (물리 삭제 없음) ---------- */
-document.getElementById('deleteBtn').addEventListener('click', async () => {
-  if(!editingId) return;
-  if(!confirm('이 정산 유형을 비활성화할까요? (완전 삭제되지 않으며, 과거 회차 이력은 유지됩니다)')) return;
-  const { error } = await sb.from('settlement_types').update({ is_active:false }).eq('id', editingId);
-  if(error){ alert('처리 실패: ' + error.message); return; }
-  closePanel();
-  await loadTypes();
-});
+  if(claimRows.length === 0){ alert('대상 리테일러/지점이 없습니다.'); return; }
+
+  const { error: insErr } = await sb.from('claims').insert(claimRows);
+  if(insErr){ alert('청구 항목 생성 실패: ' + insErr.message); return; }
+  const { error: updErr } = await sb.from('rounds').update({ status:'OPEN' }).eq('id', round.id);
+  if(updErr){ alert('회차 개설 실패: ' + updErr.message); return; }
+  await renderRoundDetail();
+}
+
+async function downloadFile(path){
+  const { data, error } = await sb.storage.from('settlements').createSignedUrl(path, 60);
+  if(error){ alert('다운로드 실패: ' + error.message); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
+/* ================================================================
+   리테일러 화면 (Phase 2)
+   ================================================================ */
+async function loadRetailerClaims(){
+  const listEl = document.getElementById('retailerList');
+  const emptyEl = document.getElementById('retailerEmpty');
+  listEl.innerHTML = '';
+
+  const { data: claims, error } = await sb.from('claims')
+    .select('*, rounds(period_label, status, claim_due_at, settlement_types(name, direction)), workshops(name)')
+    .order('created_at', { ascending:false });
+
+  if(error){ console.error(error); return; }
+  const visible = (claims||[]).filter(c => c.rounds && c.rounds.status !== 'DRAFT');
+  if(visible.length === 0){ emptyEl.style.display='block'; return; }
+  emptyEl.style.display='none';
+
+  visible.forEach(c => {
+    const card = document.createElement('div');
+    card.className = 'claim-card';
+    const editable = c.rounds.status === 'OPEN' && (!c.rounds.claim_due_at || new Date(c.rounds.claim_due_at) > new Date());
+    const label = c.workshops ? c.workshops.name : '법인 전체';
+
+    card.innerHTML = `
+      <div class="claim-head">
+        <div>
+          <div class="claim-name">${c.rounds.settlement_types?.name || ''} · ${c.rounds.period_label}</div>
+          <div class="claim-sub">${label} · 마감 ${c.rounds.claim_due_at ? new Date(c.rounds.claim_due_at).toLocaleString('ko-KR') : '미설정'}</div>
+        </div>
+        <span class="badge ${c.status==='NOT_SUBMITTED'?'badge-warn':(c.status==='REJECTED'?'badge-danger':'badge-ap')}">${CLAIM_STATUS_LABEL[c.status]||c.status}</span>
+      </div>
+      ${c.reject_reason ? `<div class="hint" style="color:var(--danger);">반송 사유: ${c.reject_reason}</div>` : ''}
+      ${editable ? `
+        <div class="claim-form">
+          <div class="field"><label>청구금액</label><input type="number" class="amt-input" value="${c.claimed_amount ?? ''}"></div>
+          <div class="field"><label>청구서 파일</label><input type="file" class="file-input"></div>
+          <button class="btn btn-sm submit-btn">제출</button>
+        </div>` : `
+        <div class="hint">청구금액: ${c.claimed_amount != null ? Number(c.claimed_amount).toLocaleString('ko-KR')+'원' : '—'}
+        ${c.file_path ? ' · <span class="file-link" data-path="'+c.file_path+'">내 파일 보기</span>' : ''}</div>
+      `}
+    `;
+    listEl.appendChild(card);
+
+    if(editable){
+      card.querySelector('.submit-btn').addEventListener('click', () => submitClaim(c, card));
+    }
+    const fl = card.querySelector('.file-link');
+    if(fl) fl.addEventListener('click', () => downloadFile(fl.dataset.path));
+  });
+}
+
+async function submitClaim(claim, card){
+  const amount = parseFloat(card.querySelector('.amt-input').value);
+  const file = card.querySelector('.file-input').files[0];
+  if(isNaN(amount)){ alert('청구금액을 입력해주세요.'); return; }
+
+  let filePath = claim.file_path;
+  if(file){
+    filePath = `${claim.retailer_id}/${claim.round_id}/${claim.id}-${file.name}`;
+    const { error: upErr } = await sb.storage.from('settlements').upload(filePath, file, { upsert:true });
+    if(upErr){ alert('파일 업로드 실패: ' + upErr.message); return; }
+  }
+
+  const { error } = await sb.from('claims').update({
+    claimed_amount: amount, file_path: filePath, status:'SUBMITTED', submitted_at: new Date().toISOString()
+  }).eq('id', claim.id);
+  if(error){ alert('제출 실패: ' + error.message); return; }
+  await loadRetailerClaims();
+}
 
 checkSession();
 </script>
