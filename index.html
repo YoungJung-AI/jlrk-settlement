@@ -173,16 +173,57 @@
   </header>
 
   <nav id="adminNav">
+    <div class="nav-item" data-nav="dashboard">대시보드</div>
     <div class="nav-item" data-nav="types">정산 유형 관리</div>
     <div class="nav-item" data-nav="rounds">회차 관리</div>
-    <div class="nav-item disabled">검토</div>
-    <div class="nav-item disabled">바우처 생성</div>
-    <div class="nav-item disabled">리테일러 관리</div>
+    <div class="nav-item" data-nav="retailers">리테일러 관리</div>
+    <div class="nav-item" data-nav="audit">활동 이력</div>
   </nav>
 
   <main>
 
     <!-- ===== 정산 유형 관리 ===== -->
+    <!-- ===== 대시보드 ===== -->
+    <section id="view-dashboard" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">대시보드</div>
+          <div class="page-desc">진행 중인 정산 현황을 한눈에 확인합니다. 회차를 클릭하면 상세로 이동합니다.</div>
+        </div>
+      </div>
+      <div class="stat-row" id="dashStats"></div>
+      <div id="dashActive"></div>
+      <div id="dashRecent"></div>
+    </section>
+
+    <!-- ===== 활동 이력 ===== -->
+    <section id="view-audit" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">활동 이력</div>
+          <div class="page-desc">누가 언제 무엇을 했는지 기록됩니다. 감사·분쟁 대응 시 근거로 사용합니다.</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="auditRefreshBtn">새로고침</button>
+      </div>
+      <div class="row2" style="max-width:520px; margin-bottom:14px;">
+        <div class="field"><label>구분 필터</label>
+          <select id="auditFilter">
+            <option value="">전체</option>
+            <option value="ROUND">회차</option>
+            <option value="CLAIM">청구</option>
+            <option value="INVOICE">세금계산서</option>
+            <option value="DISPUTE">이의제기</option>
+            <option value="VOUCHER">바우처</option>
+            <option value="MASTER">마스터</option>
+          </select>
+        </div>
+      </div>
+      <table id="auditTable">
+        <thead><tr><th>일시</th><th>사용자</th><th>구분</th><th>내용</th></tr></thead>
+        <tbody id="auditBody"></tbody>
+      </table>
+    </section>
+
     <section id="view-types">
       <div class="page-head">
         <div>
@@ -198,6 +239,20 @@
       <div id="typesEmpty" class="empty-state" style="display:none; margin-top:12px;">
         아직 등록된 정산 유형이 없습니다. [+ 새 유형]으로 첫 유형을 만들어보세요.
       </div>
+    </section>
+
+    <!-- ===== 리테일러 / 지점 관리 ===== -->
+    <section id="view-retailers" style="display:none;">
+      <div class="page-head">
+        <div>
+          <div class="page-title">리테일러 · 지점 관리</div>
+          <div class="page-desc">
+            AP는 vendor code(KRJD…), AR은 customer code(KR…MIS)로 코드 체계가 다릅니다. 바우처 생성에 두 값 모두 필요합니다.
+          </div>
+        </div>
+        <button class="btn" id="newRetailerBtn">+ 새 리테일러</button>
+      </div>
+      <div id="retailersAdmin"></div>
     </section>
 
     <!-- ===== 회차 목록 ===== -->
@@ -317,15 +372,55 @@
     <div class="chip-list" id="retailerChips"></div>
     <div class="hint">선택 안 하면 활성 리테일러 전체가 대상입니다.</div>
 
-    <div class="section-label">바우처 설정 (AP Voucher)</div>
+    <div class="section-label">바우처 설정</div>
     <div class="row2">
-      <div class="field"><label>GL 코드</label><input id="f_voucher_gl" placeholder="예: 700050800"></div>
+      <div class="field"><label>GL 코드</label><input id="f_voucher_gl" placeholder="AP 700050800 / AR 605030101"></div>
       <div class="field"><label>설명 (Text) — 회차명 제외한 프로그램명만</label><input id="f_voucher_desc" placeholder="예: Recall Campaign Upselling Program"></div>
     </div>
     <div class="row2">
       <div class="field"><label>LR 코스트센터</label><input id="f_voucher_cc_lr" placeholder="예: KR02LSU300"></div>
       <div class="field"><label>JG 코스트센터</label><input id="f_voucher_cc_jg" placeholder="예: KR02JSU300"></div>
     </div>
+
+    <div class="section-label" id="ar_section_label">AR 정산 구조 (방향이 AR일 때만 사용)</div>
+    <div class="row2">
+      <div class="field"><label>부가세 코드</label>
+        <select id="f_vat_code">
+          <option value="A1: 10%">A1: 10% (부가세 있음)</option>
+          <option value="A0: 0%">A0: 0% (대금 정산 등 부가세 없음)</option>
+        </select>
+      </div>
+      <div class="field"><label>금액 계상 단위</label>
+        <select id="f_charge_unit">
+          <option value="WORKSHOP">지점별 개별 계상 (Engine Oil)</option>
+          <option value="PRIMARY">법인 대표지점 1곳에 합산 (One DMS)</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>JG/LR 배분</label>
+        <select id="f_brand_split_mode">
+          <option value="FIXED">고정비율</option>
+          <option value="ACTUAL">원천 브랜드 실적대로</option>
+        </select>
+      </div>
+      <div class="field"><label>JG 고정비율 (0.10 = 10%)</label><input id="f_brand_jg_ratio" type="number" step="0.01" placeholder="0.10"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>청구금액 산출 방식</label>
+        <select id="f_amount_mode">
+          <option value="UPLOAD">원천 엑셀 업로드 → 자동 집계</option>
+          <option value="UNIT">수량 × 단가 계산</option>
+          <option value="MANUAL">관리자 직접 입력</option>
+        </select>
+      </div>
+      <div class="field"><label>단가 (수량×단가 방식일 때)</label><input id="f_unit_price" type="number" step="0.0001" placeholder="예: 109329.6667"></div>
+    </div>
+    <div class="field"><label>원천 엑셀 파싱 규칙 (JSON)</label>
+      <textarea id="f_source_config" rows="3" placeholder='{"sheet":"FY27 Q1 Jun","workshop_col":"Workshop","amount_col":"Total","jg_col":"Jaguar","lr_col":"Landrover"}'></textarea>
+    </div>
+    <div class="hint">업로드 방식일 때, 원천 엑셀에서 어느 시트·어느 컬럼을 읽을지 지정합니다. 컬럼명은 헤더 텍스트 일부만 적어도 매칭됩니다.</div>
+
     <div class="hint">GL코드·코스트센터·설명은 이 유형에서 고정값으로 관리됩니다. 바우처 생성 시 회차 기간이 설명 앞에 자동으로 붙고(예: "FY27 Q1 Recall Campaign Upselling Program"), 계산서 날짜도 생성 시점에 자동으로 채워집니다.</div>
 
     <div class="field">
@@ -368,6 +463,67 @@
   <div class="panel-foot">
     <button class="btn" id="saveRoundBtn" style="flex:1;">회차 만들기 (DRAFT)</button>
     <button class="btn btn-ghost" data-close-panel="roundPanel">취소</button>
+  </div>
+</div>
+
+<!-- ============ 슬라이드 패널: 리테일러 ============ -->
+<div id="retailerPanel" class="panel">
+  <div class="panel-head">
+    <div class="panel-title" id="retailerPanelTitle">리테일러</div>
+    <button class="panel-close" data-close-panel="retailerPanel">&times;</button>
+  </div>
+  <div class="panel-body">
+    <div class="row2">
+      <div class="field"><label>코드</label><input id="rt_code" placeholder="예: AJ"></div>
+      <div class="field"><label>상호</label><input id="rt_name" placeholder="예: 아주네트웍스"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>대표 사업자번호 (참고용)</label><input id="rt_biz_no" placeholder="숫자만"></div>
+      <div class="field"><label>대표자명</label><input id="rt_ceo"></div>
+    </div>
+    <div class="field"><label>알림 수신 이메일</label><input id="rt_email" type="email" placeholder="정산 안내를 받을 주소"></div>
+    <div class="hint">placeholder@example.com 인 동안은 메일이 발송되지 않습니다.</div>
+    <div class="check-row" style="margin-top:14px;"><input type="checkbox" id="rt_active" checked><label for="rt_active">활성 (신규 회차 대상에 포함)</label></div>
+    <div class="hint">비활성화해도 과거 회차 이력은 그대로 유지됩니다. 삭제 기능은 제공하지 않습니다.</div>
+  </div>
+  <div class="panel-foot">
+    <button class="btn" id="saveRetailerBtn" style="flex:1;">저장</button>
+    <button class="btn btn-ghost" data-close-panel="retailerPanel">취소</button>
+  </div>
+</div>
+
+<!-- ============ 슬라이드 패널: 지점 ============ -->
+<div id="workshopPanel" class="panel">
+  <div class="panel-head">
+    <div class="panel-title" id="workshopPanelTitle">지점</div>
+    <button class="panel-close" data-close-panel="workshopPanel">&times;</button>
+  </div>
+  <div class="panel-body">
+    <div class="field"><label>소속 리테일러</label><input id="ws_retailer_label" disabled></div>
+    <div class="row2">
+      <div class="field"><label>지점 코드</label><input id="ws_code" placeholder="예: AJ-HN"></div>
+      <div class="field"><label>지점명</label><input id="ws_name" placeholder="예: 한남"></div>
+    </div>
+
+    <div class="section-label">AP (JLRK가 지급)</div>
+    <div class="row2">
+      <div class="field"><label>Vendor code</label><input id="ws_vendor_code" placeholder="예: KRJD01047"></div>
+      <div class="field"><label>사업자번호</label><input id="ws_biz_no" placeholder="숫자만"></div>
+    </div>
+
+    <div class="section-label">AR (JLRK가 청구)</div>
+    <div class="row2">
+      <div class="field"><label>Customer code</label><input id="ws_customer_code" placeholder="예: KR00470MIS"></div>
+      <div class="field"><label>AR 사업자번호</label><input id="ws_ar_biz_no" placeholder="AP와 다를 경우만"></div>
+    </div>
+    <div class="hint">AR 사업자번호가 AP와 같으면 비워두세요. 비워두면 AP 값을 사용합니다.</div>
+
+    <div class="check-row" style="margin-top:14px;"><input type="checkbox" id="ws_primary"><label for="ws_primary">법인 대표지점 (금액을 한 곳에 몰아 계상할 때 이 지점 사용)</label></div>
+    <div class="check-row"><input type="checkbox" id="ws_active" checked><label for="ws_active">활성</label></div>
+  </div>
+  <div class="panel-foot">
+    <button class="btn" id="saveWorkshopBtn" style="flex:1;">저장</button>
+    <button class="btn btn-ghost" data-close-panel="workshopPanel">취소</button>
   </div>
 </div>
 
@@ -526,6 +682,39 @@ async function getRetailerEmails(retailerIds){
 const fmtWon = (n) => Number(n||0).toLocaleString('ko-KR') + '원';
 const fmtDate = (d) => d ? new Date(d).toLocaleString('ko-KR') : '미설정';
 
+/* ---------- 감사로그 ---------- */
+// 실패해도 업무 흐름을 막지 않도록 예외를 삼킨다
+async function logAudit(action, targetType, targetId, payload){
+  try{
+    const { data: { user } } = await sb.auth.getUser();
+    if(!user) return;
+    await sb.from('audit_log').insert({
+      actor_id: user.id, action, target_type: targetType || null,
+      target_id: targetId || null, payload: payload || null
+    });
+  } catch(e){ console.warn('[감사로그] 기록 실패', action, e); }
+}
+
+const AUDIT_LABEL = {
+  ROUND_CREATE:'회차 생성', ROUND_OPEN:'회차 개설(청구요청)', ROUND_CLOSE:'청구 마감',
+  ROUND_CONFIRM:'확정금액 공지', ROUND_INVOICED:'계산서 접수완료', ROUND_VOUCHERED:'바우처 완료처리',
+  ROUND_ARCHIVE:'아카이브(서버 정리)',
+  AR_TARGETS:'AR 청구대상 생성', AR_AMOUNT_SAVE:'AR 청구금액 저장', AR_SOURCE_PARSE:'AR 원천 집계',
+  AR_PUBLISH:'AR 청구 공지', AR_FINALIZE:'AR 최종확정',
+  CLAIM_SUBMIT:'청구서 제출', CLAIM_CANCEL:'제출 취소', CLAIM_APPROVE:'승인',
+  CLAIM_APPROVE_CORRECT:'수정승인', CLAIM_REJECT:'반송', CLAIM_RESUBMIT:'재청구',
+  INVOICE_SUBMIT:'세금계산서 제출',
+  DISPUTE_RAISE:'이의제기', DISPUTE_APPROVE:'이의 승인', DISPUTE_REJECT:'이의 반려',
+  VOUCHER_GENERATE:'바우처 생성', AR_VOUCHER_GENERATE:'AR 바우처 생성',
+  TYPE_SAVE:'정산유형 저장', RETAILER_SAVE:'리테일러 저장', WORKSHOP_SAVE:'지점 저장'
+};
+const AUDIT_GROUP = (a) => a.startsWith('ROUND')||a.startsWith('AR_PUBLISH')||a.startsWith('AR_FINALIZE')||a.startsWith('AR_TARGETS') ? 'ROUND'
+  : a.startsWith('CLAIM')||a.startsWith('AR_AMOUNT')||a.startsWith('AR_SOURCE') ? 'CLAIM'
+  : a.startsWith('INVOICE') ? 'INVOICE'
+  : a.startsWith('DISPUTE') ? 'DISPUTE'
+  : a.includes('VOUCHER') ? 'VOUCHER' : 'MASTER';
+
+
 /* ---------- 알림 시나리오별 발송 함수 ---------- */
 
 // Edge Function 배포 여부를 확인해 안내 문구를 갱신
@@ -670,7 +859,7 @@ async function enterApp(session){
     app.classList.remove('retailer-mode');
     document.getElementById('adminNav').style.display = 'block';
     await loadRetailers();
-    switchView('types');
+    switchView('dashboard');
   } else {
     document.getElementById('brandSub').textContent = 'Settlement Portal · Retailer';
     app.classList.add('retailer-mode');
@@ -709,6 +898,9 @@ function switchView(name){
   document.querySelectorAll('#adminNav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.nav === name));
   if(name === 'types') loadTypes();
   if(name === 'rounds') loadRounds();
+  if(name === 'retailers') loadRetailersAdmin();
+  if(name === 'dashboard') loadDashboard();
+  if(name === 'audit') loadAudit();
   if(name === 'retailer') loadRetailerClaims();
 }
 document.querySelectorAll('#adminNav .nav-item[data-nav]').forEach(item => {
@@ -800,6 +992,14 @@ function openTypePanel(t){
   document.getElementById('f_voucher_desc').value = vLine.description || '';
   document.getElementById('f_voucher_cc_lr').value = vLine.cc_lr || '';
   document.getElementById('f_voucher_cc_jg').value = vLine.cc_jg || '';
+  document.getElementById('f_vat_code').value = t?.vat_code || 'A1: 10%';
+  document.getElementById('f_charge_unit').value = t?.charge_unit || 'WORKSHOP';
+  document.getElementById('f_brand_split_mode').value = t?.brand_split_mode || 'FIXED';
+  document.getElementById('f_brand_jg_ratio').value = t?.brand_jg_ratio ?? 0.10;
+  document.getElementById('f_amount_mode').value = t?.amount_mode || 'UPLOAD';
+  document.getElementById('f_unit_price').value = t?.unit_price ?? '';
+  document.getElementById('f_source_config').value = t?.source_config && Object.keys(t.source_config).length
+    ? JSON.stringify(t.source_config, null, 0) : '';
   document.getElementById('f_voucher_template').value = '';
   document.getElementById('voucherTemplateStatus').textContent = t?.voucher_template_path
     ? `업로드됨: ${t.voucher_template_path.split('/').pop()}`
@@ -839,6 +1039,18 @@ document.getElementById('saveTypeBtn').addEventListener('click', async () => {
       cc_lr: document.getElementById('f_voucher_cc_lr').value.trim(),
       cc_jg: document.getElementById('f_voucher_cc_jg').value.trim()
     }],
+    vat_code: document.getElementById('f_vat_code').value,
+    charge_unit: document.getElementById('f_charge_unit').value,
+    brand_split_mode: document.getElementById('f_brand_split_mode').value,
+    brand_jg_ratio: parseFloat(document.getElementById('f_brand_jg_ratio').value) || 0.10,
+    amount_mode: document.getElementById('f_amount_mode').value,
+    unit_price: document.getElementById('f_unit_price').value ? parseFloat(document.getElementById('f_unit_price').value) : null,
+    source_config: (() => {
+      const raw = document.getElementById('f_source_config').value.trim();
+      if(!raw) return {};
+      try { return JSON.parse(raw); }
+      catch(e){ alert('원천 파싱 규칙 JSON 형식이 잘못되었습니다. 빈 값으로 저장합니다.'); return {}; }
+    })(),
     is_active: document.getElementById('f_is_active').checked
   };
   if(!payload.code || !payload.name){ alert('유형코드와 유형명은 필수입니다.'); return; }
@@ -876,6 +1088,284 @@ document.getElementById('deleteTypeBtn').addEventListener('click', async () => {
 /* ================================================================
    회차 관리 (Phase 2)
    ================================================================ */
+/* ================================================================
+   리테일러 · 지점 관리
+   ================================================================ */
+let editingRetailerId = null;
+let editingWorkshopId = null;
+let editingWorkshopRetailerId = null;
+
+/* ================================================================
+   대시보드 · 활동 이력
+   ================================================================ */
+async function loadDashboard(){
+  const statsEl = document.getElementById('dashStats');
+  const activeEl = document.getElementById('dashActive');
+  const recentEl = document.getElementById('dashRecent');
+  statsEl.innerHTML = ''; activeEl.innerHTML = '<div class="hint">불러오는 중...</div>'; recentEl.innerHTML = '';
+
+  const { data: rounds } = await sb.from('rounds')
+    .select('*, settlement_types(name, code, direction)')
+    .order('created_at', { ascending:false });
+  const live = (rounds||[]).filter(r => !['VOUCHERED','ARCHIVED','FINALIZED'].includes(r.status));
+  const toArchive = (rounds||[]).filter(r => ['VOUCHERED','FINALIZED'].includes(r.status));
+
+  const { data: allClaims } = await sb.from('claims').select('round_id, status, confirmed_at, approved_amount');
+  const { data: allInv } = await sb.from('invoices').select('round_id, status');
+  const liveIds = new Set(live.map(r => r.id));
+  const liveClaims = (allClaims||[]).filter(c => liveIds.has(c.round_id));
+
+  const notSubmitted = liveClaims.filter(c => c.status === 'NOT_SUBMITTED').length;
+  const pendingReview = liveClaims.filter(c => c.status === 'SUBMITTED').length;
+  const rejected = liveClaims.filter(c => c.status === 'REJECTED').length;
+  const invPending = (allInv||[]).filter(i => liveIds.has(i.round_id) && i.status === 'PENDING').length;
+
+  const stat = (num, label, color) =>
+    `<div class="stat-card"><div class="stat-num" ${color?`style="color:${color};"`:''}>${num}</div><div class="stat-label">${label}</div></div>`;
+  statsEl.innerHTML =
+    stat(live.length, '진행 중 회차')
+    + stat(notSubmitted, '미제출 건', notSubmitted ? 'var(--accent-ar)' : null)
+    + stat(pendingReview, '검토 대기', pendingReview ? 'var(--accent-ar)' : null)
+    + stat(rejected, '반송 중', rejected ? 'var(--danger)' : null)
+    + stat(invPending, '계산서 미접수', invPending ? 'var(--accent-ar)' : null)
+    + stat(toArchive.length, '아카이브 대기', toArchive.length ? 'var(--accent-ar)' : null);
+
+  // 진행 중 회차
+  activeEl.innerHTML = '';
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `<div class="section-label" style="margin-top:0;">진행 중 회차 (${live.length})</div>`;
+  if(live.length === 0){
+    card.innerHTML += '<div class="hint">진행 중인 회차가 없습니다.</div>';
+  } else {
+    const tbl = document.createElement('table');
+    tbl.innerHTML = `<thead><tr><th>기간</th><th>유형</th><th>상태</th><th>진행</th><th>마감</th><th>금액</th></tr></thead><tbody></tbody>`;
+    const tb = tbl.querySelector('tbody');
+    live.forEach(r => {
+      const cs = (allClaims||[]).filter(c => c.round_id === r.id);
+      const isAR = r.settlement_types?.direction === 'AR';
+      const done = isAR ? cs.filter(c => c.confirmed_at).length
+                        : cs.filter(c => ['SUBMITTED','APPROVED'].includes(c.status)).length;
+      const total = cs.length;
+      const pct = total ? Math.round(done/total*100) : 0;
+      const sum = cs.reduce((s,c) => s + Number(c.approved_amount||0), 0);
+      const due = isAR ? r.dispute_due_at : r.claim_due_at;
+      const overdue = due && new Date(due) < new Date();
+      const tr = document.createElement('tr');
+      tr.className = 'clickable';
+      tr.addEventListener('click', () => openRoundDetail(r.id));
+      tr.innerHTML = `
+        <td>${r.period_label}</td>
+        <td class="muted">${r.settlement_types?.name||''}</td>
+        <td><span class="badge ${isAR?'badge-ar':'badge-ap'}">${ROUND_STATUS_LABEL[r.status]||r.status}</span></td>
+        <td>${total ? `${done}/${total}
+             <div style="height:4px;background:var(--surface3);border-radius:2px;margin-top:4px;overflow:hidden;">
+               <div style="height:100%;width:${pct}%;background:${pct===100?'var(--accent)':'var(--accent-ar)'};"></div>
+             </div>` : '—'}</td>
+        <td class="muted" ${overdue?'style="color:var(--danger);"':''}>${due ? new Date(due).toLocaleDateString('ko-KR') : '—'}${overdue?' (경과)':''}</td>
+        <td>${sum ? fmtWon(sum) : '—'}</td>`;
+      tb.appendChild(tr);
+    });
+    card.appendChild(tbl);
+  }
+  activeEl.appendChild(card);
+
+  // 최근 활동
+  const { data: logs } = await sb.from('audit_log')
+    .select('*, profiles(display_name)').order('at', { ascending:false }).limit(8);
+  const rc = document.createElement('div');
+  rc.className = 'info-card';
+  rc.innerHTML = `<div class="section-label" style="margin-top:0;">최근 활동</div>`;
+  if(!logs || logs.length === 0){
+    rc.innerHTML += '<div class="hint">아직 기록된 활동이 없습니다.</div>';
+  } else {
+    const tbl = document.createElement('table');
+    tbl.innerHTML = '<tbody></tbody>';
+    const tb = tbl.querySelector('tbody');
+    logs.forEach(l => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="muted" style="width:150px;">${new Date(l.at).toLocaleString('ko-KR')}</td>
+        <td style="width:110px;">${l.profiles?.display_name||'—'}</td>
+        <td>${AUDIT_LABEL[l.action]||l.action}<span class="hint" style="margin-left:8px;">${l.payload?.label||''}</span></td>`;
+      tb.appendChild(tr);
+    });
+    rc.appendChild(tbl);
+  }
+  recentEl.appendChild(rc);
+}
+
+async function loadAudit(){
+  const tbody = document.getElementById('auditBody');
+  tbody.innerHTML = '<tr><td colspan="4" class="muted">불러오는 중...</td></tr>';
+  const filter = document.getElementById('auditFilter').value;
+  const { data: logs, error } = await sb.from('audit_log')
+    .select('*, profiles(display_name)').order('at', { ascending:false }).limit(300);
+  if(error){ tbody.innerHTML = `<tr><td colspan="4" class="muted">${error.message}</td></tr>`; return; }
+  const rows = (logs||[]).filter(l => !filter || AUDIT_GROUP(l.action) === filter);
+  tbody.innerHTML = '';
+  if(rows.length === 0){ tbody.innerHTML = '<tr><td colspan="4" class="muted">기록이 없습니다.</td></tr>'; return; }
+  rows.forEach(l => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="muted" style="white-space:nowrap;">${new Date(l.at).toLocaleString('ko-KR')}</td>
+      <td>${l.profiles?.display_name||'—'}</td>
+      <td><span class="badge badge-off">${AUDIT_GROUP(l.action)}</span></td>
+      <td>${AUDIT_LABEL[l.action]||l.action}
+        ${l.payload?.label?`<div class="hint">${l.payload.label}</div>`:''}
+        ${l.payload?.amount!=null?`<div class="hint">${fmtWon(l.payload.amount)}</div>`:''}
+        ${l.payload?.reason?`<div class="hint" style="color:var(--danger);">${l.payload.reason}</div>`:''}
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+document.getElementById('auditRefreshBtn').addEventListener('click', loadAudit);
+document.getElementById('auditFilter').addEventListener('change', loadAudit);
+
+async function loadRetailersAdmin(){
+  const wrap = document.getElementById('retailersAdmin');
+  wrap.innerHTML = '<div class="hint">불러오는 중...</div>';
+
+  const { data: rets, error } = await sb.from('retailers').select('*').order('code');
+  if(error){ wrap.innerHTML = `<div class="hint" style="color:var(--danger);">${error.message}</div>`; return; }
+  const { data: wss } = await sb.from('workshops').select('*').order('code');
+
+  wrap.innerHTML = '';
+  if(!rets || rets.length === 0){
+    wrap.innerHTML = '<div class="empty-state">등록된 리테일러가 없습니다.</div>';
+    return;
+  }
+
+  rets.forEach(r => {
+    const myWs = (wss||[]).filter(w => w.retailer_id === r.id);
+    const missingAR = myWs.filter(w => w.is_active && !w.customer_code).length;
+    const card = document.createElement('div');
+    card.className = 'info-card';
+    card.innerHTML = `
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div>
+          <div style="font-size:15px; font-weight:600;">
+            ${r.code} · ${r.name}
+            ${r.is_active ? '' : '<span class="badge badge-off" style="margin-left:6px;">비활성</span>'}
+            ${missingAR ? `<span class="badge badge-warn" style="margin-left:6px;">AR 코드 미입력 ${missingAR}</span>` : ''}
+          </div>
+          <div class="hint">지점 ${myWs.length}개 · ${r.email && !/placeholder@example\.com/i.test(r.email) ? r.email : '<span style="color:var(--accent-ar);">이메일 미등록</span>'}</div>
+        </div>
+        <div style="white-space:nowrap;">
+          <button class="btn btn-ghost btn-sm edit-retailer-btn" data-id="${r.id}">리테일러 수정</button>
+          <button class="btn btn-sm add-ws-btn" data-id="${r.id}" data-label="${r.code} ${r.name}" style="margin-left:6px;">+ 지점</button>
+        </div>
+      </div>`;
+
+    if(myWs.length > 0){
+      const tbl = document.createElement('table');
+      tbl.style.marginTop = '12px';
+      tbl.innerHTML = `<thead><tr><th>지점</th><th>Vendor code (AP)</th><th>사업자번호</th><th>Customer code (AR)</th><th>AR 사업자번호</th><th>상태</th><th></th></tr></thead><tbody></tbody>`;
+      const tb = tbl.querySelector('tbody');
+      myWs.forEach(w => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${w.code} · ${w.name}${w.is_primary?' <span class="badge badge-ap">대표</span>':''}</td>
+          <td class="muted">${w.vendor_code||'<span style="color:var(--accent-ar);">미입력</span>'}</td>
+          <td class="muted">${w.biz_no||'—'}</td>
+          <td class="muted">${w.customer_code||'<span style="color:var(--accent-ar);">미입력</span>'}</td>
+          <td class="muted">${w.ar_biz_no||'<span style="opacity:.5;">AP와 동일</span>'}</td>
+          <td>${w.is_active?'<span class="badge badge-ap">활성</span>':'<span class="badge badge-off">비활성</span>'}</td>
+          <td><button class="btn btn-ghost btn-sm edit-ws-btn" data-id="${w.id}" data-label="${r.code} ${r.name}">수정</button></td>`;
+        tb.appendChild(tr);
+      });
+      card.appendChild(tbl);
+    }
+    wrap.appendChild(card);
+  });
+
+  wrap.querySelectorAll('.edit-retailer-btn').forEach(b =>
+    b.addEventListener('click', () => openRetailerPanel(rets.find(x => x.id === b.dataset.id))));
+  wrap.querySelectorAll('.add-ws-btn').forEach(b =>
+    b.addEventListener('click', () => openWorkshopPanel(null, b.dataset.id, b.dataset.label)));
+  wrap.querySelectorAll('.edit-ws-btn').forEach(b =>
+    b.addEventListener('click', () => {
+      const w = (wss||[]).find(x => x.id === b.dataset.id);
+      openWorkshopPanel(w, w.retailer_id, b.dataset.label);
+    }));
+}
+
+function openRetailerPanel(r){
+  editingRetailerId = r?.id || null;
+  document.getElementById('retailerPanelTitle').textContent = r ? '리테일러 수정' : '새 리테일러';
+  document.getElementById('rt_code').value = r?.code || '';
+  document.getElementById('rt_name').value = r?.name || '';
+  document.getElementById('rt_biz_no').value = r?.biz_no || '';
+  document.getElementById('rt_ceo').value = r?.ceo_name || '';
+  document.getElementById('rt_email').value = r?.email || '';
+  document.getElementById('rt_active').checked = r ? !!r.is_active : true;
+  openPanel('retailerPanel');
+}
+
+function openWorkshopPanel(w, retailerId, retailerLabel){
+  editingWorkshopId = w?.id || null;
+  editingWorkshopRetailerId = retailerId;
+  document.getElementById('workshopPanelTitle').textContent = w ? '지점 수정' : '새 지점';
+  document.getElementById('ws_retailer_label').value = retailerLabel || '';
+  document.getElementById('ws_code').value = w?.code || '';
+  document.getElementById('ws_name').value = w?.name || '';
+  document.getElementById('ws_vendor_code').value = w?.vendor_code || '';
+  document.getElementById('ws_biz_no').value = w?.biz_no || '';
+  document.getElementById('ws_customer_code').value = w?.customer_code || '';
+  document.getElementById('ws_ar_biz_no').value = w?.ar_biz_no || '';
+  document.getElementById('ws_primary').checked = !!w?.is_primary;
+  document.getElementById('ws_active').checked = w ? !!w.is_active : true;
+  openPanel('workshopPanel');
+}
+
+document.getElementById('newRetailerBtn').addEventListener('click', () => openRetailerPanel(null));
+
+document.getElementById('saveRetailerBtn').addEventListener('click', async () => {
+  const payload = {
+    code: document.getElementById('rt_code').value.trim(),
+    name: document.getElementById('rt_name').value.trim(),
+    biz_no: document.getElementById('rt_biz_no').value.trim() || null,
+    ceo_name: document.getElementById('rt_ceo').value.trim() || null,
+    email: document.getElementById('rt_email').value.trim() || 'placeholder@example.com',
+    is_active: document.getElementById('rt_active').checked
+  };
+  if(!payload.code || !payload.name){ alert('코드와 상호는 필수입니다.'); return; }
+  const { error } = editingRetailerId
+    ? await sb.from('retailers').update(payload).eq('id', editingRetailerId)
+    : await sb.from('retailers').insert(payload);
+  if(error){ alert('저장 실패: ' + error.message); return; }
+  await logAudit('RETAILER_SAVE','MASTER',null,{label:`${payload.code} ${payload.name}`});
+  closePanel('retailerPanel');
+  await loadRetailersAdmin();
+});
+
+document.getElementById('saveWorkshopBtn').addEventListener('click', async () => {
+  const payload = {
+    retailer_id: editingWorkshopRetailerId,
+    code: document.getElementById('ws_code').value.trim(),
+    name: document.getElementById('ws_name').value.trim(),
+    vendor_code: document.getElementById('ws_vendor_code').value.trim() || null,
+    biz_no: document.getElementById('ws_biz_no').value.trim() || null,
+    customer_code: document.getElementById('ws_customer_code').value.trim() || null,
+    ar_biz_no: document.getElementById('ws_ar_biz_no').value.trim() || null,
+    is_primary: document.getElementById('ws_primary').checked,
+    is_active: document.getElementById('ws_active').checked
+  };
+  if(!payload.code || !payload.name){ alert('지점 코드와 지점명은 필수입니다.'); return; }
+
+  // 대표지점은 리테일러당 1곳만 — 새로 지정하면 기존 대표는 해제
+  if(payload.is_primary){
+    await sb.from('workshops').update({ is_primary:false }).eq('retailer_id', editingWorkshopRetailerId);
+  }
+  const { error } = editingWorkshopId
+    ? await sb.from('workshops').update(payload).eq('id', editingWorkshopId)
+    : await sb.from('workshops').insert(payload);
+  if(error){ alert('저장 실패: ' + error.message); return; }
+  await logAudit('WORKSHOP_SAVE','MASTER',null,{label:`${payload.code} ${payload.name}`});
+  closePanel('workshopPanel');
+  await loadRetailersAdmin();
+});
+
 async function loadRounds(){
   const { data, error } = await sb.from('rounds')
     .select('*, settlement_types(name, code, direction, claim_unit)')
@@ -989,6 +1479,7 @@ async function renderRoundDetail(){
       if(!confirm('마감하면 리테일러가 더 이상 제출할 수 없습니다. 계속할까요?')) return;
       const { error } = await sb.from('rounds').update({status:'CLOSED'}).eq('id', round.id);
       if(error){ alert('처리 실패: '+error.message); return; }
+      await logAudit('ROUND_CLOSE','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
       await renderRoundDetail();
     });
     actions.appendChild(btn);
@@ -1110,6 +1601,10 @@ async function renderRoundDetail(){
   if(round.status === 'INVOICED' || round.status === 'VOUCHERED'){
     await renderVoucherSection(round, type, claims);
   }
+  /* ---------- 아카이브 섹션 (바우처 완료 이후) ---------- */
+  if(round.status === 'VOUCHERED' || round.status === 'ARCHIVED'){
+    await renderArchiveSection(round, type, claims);
+  }
 
   /* ---------- 전체 청구 목록 (참고용) ---------- */
   const tbody = document.getElementById('claimsBody');
@@ -1162,6 +1657,7 @@ async function approveClaim(rowEl, isCorrection){
 
   const { error } = await sb.from('claims').update(payload).eq('id', claimId);
   if(error){ alert('처리 실패: ' + error.message); return; }
+  await logAudit(isCorrection?'CLAIM_APPROVE_CORRECT':'CLAIM_APPROVE','CLAIM',claimId,{amount, reason: isCorrection?reason:null});
   await renderRoundDetail();
 }
 
@@ -1190,6 +1686,7 @@ async function rejectClaim(rowEl){
 
   const { error } = await sb.from('claims').update(payload).eq('id', claimId);
   if(error){ alert('반송 실패: ' + error.message); return; }
+  await logAudit('CLAIM_REJECT','CLAIM',claimId,{reason, amount: suggestedAmount});
 
   // ③ 해당 리테일러에게만 반송 안내
   try{
@@ -1227,7 +1724,7 @@ async function renderARRoundDetail(round, type){
     ? new Date(round.dispute_due_at).toLocaleString('ko-KR') + ' (이의제기 마감)' : '이의제기 마감 미설정';
 
   const { data: claims } = await sb.from('claims')
-    .select('*, retailers(code,name,email)')
+    .select('*, retailers(code,name,email), workshops(name, code)')
     .eq('round_id', round.id).order('created_at');
   const { data: disputes } = await sb.from('disputes')
     .select('*, retailers(code,name)').eq('round_id', round.id);
@@ -1255,7 +1752,19 @@ async function renderARRoundDetail(round, type){
       actions.appendChild(btn);
     } else {
       const wrap = document.createElement('div');
+      const modeLabel = { UPLOAD:'원천 엑셀 업로드', UNIT:'수량 × 단가', MANUAL:'직접 입력' }[type.amount_mode||'UPLOAD'];
       wrap.innerHTML = `
+        <div class="hint" style="margin-bottom:8px;">
+          산출방식 <b>${modeLabel}</b> ·
+          부가세 <b>${type.vat_code||'A1: 10%'}</b> ·
+          JG/LR <b>${type.brand_split_mode==='ACTUAL'?'실적 기준':`고정 ${Math.round((type.brand_jg_ratio??0.1)*100)}:${100-Math.round((type.brand_jg_ratio??0.1)*100)}`}</b>
+        </div>
+        ${type.amount_mode==='UPLOAD' ? `
+        <div class="field" style="max-width:520px;">
+          <label>원천 엑셀 업로드 (지점별 금액이 자동으로 아래 표에 채워집니다)</label>
+          <input type="file" id="ar_source_file" accept=".xlsx,.xls">
+          <div class="hint" id="ar_source_hint"></div>
+        </div>` : ''}
         <div class="row2" style="max-width:420px;">
           <div class="field"><label>이의제기 마감일시 (선택)</label><input type="datetime-local" id="ar_dispute_due"></div>
         </div>
@@ -1263,6 +1772,8 @@ async function renderARRoundDetail(round, type){
         <button class="btn" id="publishARBtn">리테일러에 청구 공지</button>`;
       actions.appendChild(wrap);
       document.getElementById('publishARBtn').addEventListener('click', () => publishARRound(round, type, claims));
+      const srcInput = document.getElementById('ar_source_file');
+      if(srcInput) srcInput.addEventListener('change', () => parseARSource(srcInput, type, round));
 
       const card = document.createElement('div');
       card.className = 'info-card';
@@ -1338,6 +1849,22 @@ async function renderARRoundDetail(round, type){
     }
   }
 
+  /* ---------- FINALIZED: AR 바우처 생성 ---------- */
+  if(round.status === 'FINALIZED'){
+    const wrap = document.createElement('div');
+    const hasTemplate = !!type.voucher_template_path;
+    wrap.innerHTML = `
+      <div class="hint" style="margin-bottom:8px;">
+        확정 완료 · 부가세 <b>${type.vat_code||'A1: 10%'}</b>
+        ${hasTemplate ? '' : ' · <span style="color:var(--accent-ar);">바우처 템플릿 미등록 (정산 유형 관리에서 AR 원본 양식을 업로드하세요)</span>'}
+      </div>
+      ${hasTemplate ? '<button class="btn" id="genARVoucherBtn">AR 바우처 생성 (xlsx 다운로드)</button>' : ''}
+      <div class="hint" id="ar_voucher_progress" style="margin-top:8px;"></div>`;
+    actions.appendChild(wrap);
+    const gv = document.getElementById('genARVoucherBtn');
+    if(gv) gv.addEventListener('click', () => generateARVoucher(round, type, claims));
+  }
+
   /* ---------- 전체 현황표 ---------- */
   const listCard = document.createElement('div');
   listCard.className = 'info-card';
@@ -1346,7 +1873,7 @@ async function renderARRoundDetail(round, type){
     listCard.innerHTML += '<div class="hint">아직 청구 대상이 생성되지 않았습니다.</div>';
   } else {
     const tbl = document.createElement('table');
-    tbl.innerHTML = `<thead><tr><th>리테일러</th><th>청구금액</th><th>상태</th><th>근거자료</th></tr></thead><tbody></tbody>`;
+    tbl.innerHTML = `<thead><tr><th>리테일러</th><th>청구금액</th><th>JG</th><th>LR</th><th>상태</th><th>근거자료</th></tr></thead><tbody></tbody>`;
     const tb = tbl.querySelector('tbody');
     (claims||[]).forEach(c => {
       const d = disputeByRetailer.get(c.retailer_id);
@@ -1360,23 +1887,124 @@ async function renderARRoundDetail(round, type){
       tr.innerHTML = `
         <td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
         <td><b>${fmtWon(c.approved_amount)}</b></td>
+        <td class="muted">${c.jg_amount!=null?fmtWon(c.jg_amount):'—'}</td>
+        <td class="muted">${c.lr_amount!=null?fmtWon(c.lr_amount):'—'}</td>
         <td>${badge}${d?.decision_note?`<div class="hint">${d.decision_note}</div>`:''}</td>
         <td>${c.evidence_path?`<span class="file-link" data-path="${c.evidence_path}">다운로드</span>`:'—'}</td>`;
       tb.appendChild(tr);
     });
     const sum = (claims||[]).reduce((s,c)=>s+Number(c.approved_amount||0),0);
-    tbl.innerHTML += `<tfoot><tr><td style="text-align:right;">합계</td><td><b>${fmtWon(sum)}</b></td><td colspan="2"></td></tr></tfoot>`;
+    const sumJG = (claims||[]).reduce((s,c)=>s+Number(c.jg_amount||0),0);
+    const sumLR = (claims||[]).reduce((s,c)=>s+Number(c.lr_amount||0),0);
+    tbl.innerHTML += `<tfoot><tr><td style="text-align:right;">합계</td><td><b>${fmtWon(sum)}</b></td><td><b>${fmtWon(sumJG)}</b></td><td><b>${fmtWon(sumLR)}</b></td><td colspan="2">${sumJG+sumLR===sum?'<span class="badge badge-ap">JG+LR 일치</span>':'<span class="badge badge-danger">배분 불일치</span>'}</td></tr></tfoot>`;
     listCard.appendChild(tbl);
   }
   voucherSection.appendChild(listCard);
   listCard.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
 
+  // AR 아카이브 (최종 확정 이후)
+  if(round.status === 'FINALIZED' || round.status === 'ARCHIVED'){
+    await renderArchiveSection(round, type, claims);
+  }
+
   document.getElementById('claimsTable').style.display = 'none';
 }
 
+// AR: 원천 엑셀을 읽어 지점별 금액(및 브랜드별 금액)을 집계해 claims에 반영
+async function parseARSource(inputEl, type, round){
+  const hintEl = document.getElementById('ar_source_hint');
+  const file = inputEl.files[0];
+  if(!file) return;
+  const cfg = type.source_config || {};
+  try{
+    hintEl.textContent = '원천 파일을 읽는 중...';
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type:'array' });
+    const sheetName = cfg.sheet && wb.SheetNames.includes(cfg.sheet) ? cfg.sheet : wb.SheetNames[0];
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header:1, defval:'' });
+
+    const findCol = (header, keyword) => {
+      if(!keyword) return -1;
+      const k = normalizeLabel(keyword);
+      return header.findIndex(h => normalizeLabel(h).includes(k));
+    };
+
+    // 헤더 행 탐색: workshop 컬럼 키워드가 있는 행
+    const wsKey = cfg.workshop_col || 'Workshop';
+    let headerIdx = -1, header = null;
+    for(let i=0; i<Math.min(rows.length, 30); i++){
+      if(findCol(rows[i], wsKey) !== -1){ headerIdx = i; header = rows[i]; break; }
+    }
+    if(headerIdx === -1){ hintEl.textContent = `헤더에서 '${wsKey}' 컬럼을 찾지 못했습니다. 파싱 규칙을 확인해주세요.`; return; }
+
+    const wsCol  = findCol(header, wsKey);
+    const amtCol = findCol(header, cfg.amount_col || 'Total');
+    const jgCol  = findCol(header, cfg.jg_col);
+    const lrCol  = findCol(header, cfg.lr_col);
+    if(amtCol === -1){ hintEl.textContent = `금액 컬럼('${cfg.amount_col||'Total'}')을 찾지 못했습니다.`; return; }
+
+    // 지점 라벨별 집계
+    const byWorkshop = new Map();
+    for(let i=headerIdx+1; i<rows.length; i++){
+      const row = rows[i];
+      const label = String(row[wsCol]||'').trim();
+      if(!label || /total|합계|총합계/i.test(label)) continue;
+      const num = (v) => { const n = parseFloat(String(v).replace(/,/g,'')); return isNaN(n) ? 0 : n; };
+      const cur = byWorkshop.get(normalizeLabel(label)) || { label, amount:0, jg:0, lr:0 };
+      cur.amount += num(row[amtCol]);
+      if(jgCol !== -1) cur.jg += num(row[jgCol]);
+      if(lrCol !== -1) cur.lr += num(row[lrCol]);
+      byWorkshop.set(normalizeLabel(label), cur);
+    }
+    if(byWorkshop.size === 0){ hintEl.textContent = '집계할 데이터 행을 찾지 못했습니다.'; return; }
+
+    // DB의 지점 마스터와 매칭 → 리테일러별로 합산
+    const { data: allWorkshops } = await sb.from('workshops').select('id, code, name, retailer_id').eq('is_active', true);
+    const byRetailer = new Map();
+    let matched = 0;
+    const unmatched = [];
+    byWorkshop.forEach(v => {
+      const norm = normalizeLabel(v.label);
+      const ws = (allWorkshops||[]).find(w => normalizeLabel(w.code) === norm)
+              || (allWorkshops||[]).find(w => normalizeLabel(w.name) === norm);
+      if(!ws){ unmatched.push(v.label); return; }
+      matched++;
+      const g = byRetailer.get(ws.retailer_id) || { amount:0, jg:0, lr:0 };
+      g.amount += v.amount; g.jg += v.jg; g.lr += v.lr;
+      byRetailer.set(ws.retailer_id, g);
+    });
+
+    // 브랜드 배분 결정
+    const useActual = type.brand_split_mode === 'ACTUAL' && jgCol !== -1 && lrCol !== -1;
+    const jgRatio = type.brand_jg_ratio ?? 0.10;
+
+    // claims 업데이트
+    const { data: claims } = await sb.from('claims').select('id, retailer_id').eq('round_id', round.id);
+    let updated = 0;
+    for(const c of (claims||[])){
+      const g = byRetailer.get(c.retailer_id);
+      if(!g) continue;
+      const amount = Math.round(g.amount);
+      const jg = useActual ? Math.round(g.jg) : Math.round(amount * jgRatio);
+      const lr = amount - jg;
+      const { error } = await sb.from('claims')
+        .update({ approved_amount: amount, jg_amount: jg, lr_amount: lr }).eq('id', c.id);
+      if(!error) updated++;
+    }
+
+    await logAudit('AR_SOURCE_PARSE','ROUND',round.id,{label:`지점 ${matched}개 매칭`});
+    hintEl.innerHTML = `지점 ${byWorkshop.size}개 중 ${matched}개 매칭 · 리테일러 ${updated}곳 금액 반영 완료`
+      + (unmatched.length ? `<br><span style="color:var(--accent-ar);">미매칭 지점: ${unmatched.join(', ')}</span>` : '')
+      + `<br>브랜드 배분: ${useActual ? '원천 실적 기준' : `고정 JG ${Math.round(jgRatio*100)}%`}`;
+    await renderRoundDetail();
+  } catch(e){
+    console.error(e);
+    hintEl.textContent = '원천 파일 처리 실패: ' + e.message;
+  }
+}
+
 // AR: 대상 리테일러로 청구 행 생성
-async function createARTargets(round, type){
-  let targets = type.target_retailers;
+async function createARTargets(round, type){  let targets = type.target_retailers;
   if(!targets || targets.length === 0){
     const { data: all } = await sb.from('retailers').select('id').eq('is_active', true);
     targets = (all||[]).map(r => r.id);
@@ -1385,6 +2013,7 @@ async function createARTargets(round, type){
   const rows = targets.map(rid => ({ round_id: round.id, retailer_id: rid, status:'NOT_SUBMITTED' }));
   const { error } = await sb.from('claims').insert(rows);
   if(error){ alert('생성 실패: ' + error.message); return; }
+  await logAudit('AR_TARGETS','ROUND',round.id,{label:`${rows.length}개사`});
   await renderRoundDetail();
 }
 
@@ -1417,6 +2046,7 @@ async function publishARRound(round, type, claims){
   const dispute_due_at = dueInput?.value ? new Date(dueInput.value).toISOString() : null;
   const { error } = await sb.from('rounds').update({ status:'PUBLISHED', dispute_due_at }).eq('id', round.id);
   if(error){ alert('공지 실패: ' + error.message); return; }
+  await logAudit('AR_PUBLISH','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
 
   // 리테일러별 개별 청구 안내 메일 (타사 금액 노출 방지)
   for(const c of (claims||[])){
@@ -1453,6 +2083,7 @@ async function decideDispute(rowEl, approve, round, type){
   };
   const { error } = await sb.from('disputes').update(payload).eq('id', disputeId);
   if(error){ alert('처리 실패: ' + error.message); return; }
+  await logAudit(approve?'DISPUTE_APPROVE':'DISPUTE_REJECT','DISPUTE',disputeId,{reason:note});
 
   let newAmount = null;
   if(approve && claimId){
@@ -1479,13 +2110,114 @@ async function decideDispute(rowEl, approve, round, type){
   await renderRoundDetail();
 }
 
+// AR: 바우처 생성 — 원본 AR 템플릿의 XML을 직접 수정 (AP와 동일 방식)
+async function generateARVoucher(round, type, claims){
+  const progressEl = document.getElementById('ar_voucher_progress');
+  const setProgress = (m) => { if(progressEl) progressEl.innerHTML = m; };
+  try{
+    setProgress('템플릿을 불러오는 중...');
+    const { data: signed, error: sErr } = await sb.storage.from('settlements')
+      .createSignedUrl(type.voucher_template_path, 60);
+    if(sErr || !signed) throw new Error('템플릿을 불러오지 못했습니다: ' + (sErr?.message||''));
+    const tplBuffer = await (await fetch(signed.signedUrl)).arrayBuffer();
+
+    // AR 템플릿의 input 시트 이름은 끝에 공백이 있는 경우가 있음 ('AR_input reqeust ')
+    const readWb = XLSX.read(tplBuffer, { type:'array' });
+    const inputSheetName = readWb.SheetNames.find(n => /AR_input\s*reque?st/i.test(n));
+    const coverSheetName = readWb.SheetNames.find(n => /AR without PO/i.test(n));
+    if(!inputSheetName) throw new Error("템플릿에서 'AR_input reqeust' 시트를 찾지 못했습니다.");
+
+    // customer code(D열) → 행번호 매핑
+    const readInput = readWb.Sheets[inputSheetName];
+    const custRowMap = new Map();
+    for(let r = 5; r <= 60; r++){
+      const cell = readInput['D'+r];
+      if(cell && cell.v) custRowMap.set(String(cell.v).trim(), r);
+    }
+
+    // 지점 마스터 조회 (customer code 필요)
+    const { data: allWs } = await sb.from('workshops').select('*').eq('is_active', true);
+    const wsByRetailer = new Map();
+    (allWs||[]).forEach(w => {
+      if(!wsByRetailer.has(w.retailer_id)) wsByRetailer.set(w.retailer_id, []);
+      wsByRetailer.get(w.retailer_id).push(w);
+    });
+
+    setProgress('금액을 배치하는 중...');
+    const inputCells = {};
+    const unmatched = [];
+    const chargeUnit = type.charge_unit || 'WORKSHOP';
+    const vatRate = (type.vat_code === 'A0: 0%') ? 0 : 0.10;
+
+    for(const c of (claims||[])){
+      const amount = Number(c.approved_amount||0);
+      if(!amount) continue;
+      const myWs = wsByRetailer.get(c.retailer_id) || [];
+      // 대표지점(is_primary) 우선, 없으면 customer_code 있는 첫 지점
+      const target = myWs.find(w => w.is_primary && w.customer_code)
+                  || myWs.find(w => w.customer_code);
+      if(!target){ unmatched.push(c.retailers?.code || c.retailer_id); continue; }
+      const rowNum = custRowMap.get(String(target.customer_code).trim());
+      if(!rowNum){ unmatched.push(`${c.retailers?.code||''}(${target.customer_code})`); continue; }
+
+      const jg = c.jg_amount != null ? Number(c.jg_amount) : Math.round(amount * (type.brand_jg_ratio ?? 0.10));
+      const lr = c.lr_amount != null ? Number(c.lr_amount) : amount - jg;
+      inputCells[`I${rowNum}`] = amount;
+      inputCells[`J${rowNum}`] = Math.round(amount * vatRate);
+      inputCells[`M${rowNum}`] = jg;
+      inputCells[`N${rowNum}`] = lr;
+    }
+
+    if(Object.keys(inputCells).length === 0){
+      throw new Error('배치할 금액이 없습니다. 지점 마스터에 Customer code가 입력되어 있는지 확인해주세요.');
+    }
+
+    // 표지: 날짜(E21) + 설명(N39)
+    const vLine = type.voucher_lines?.[0] || {};
+    const issueDate = round.invoice_issue_date
+      ? (() => { const [y,m,d] = round.invoice_issue_date.split('-').map(Number); return new Date(Date.UTC(y,m-1,d)); })()
+      : (() => { const n = new Date(); return new Date(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())); })();
+    const coverCells = {
+      'E21': { value: dateToExcelSerial(issueDate) },
+      'N39': { value: `${round.period_label} ${vLine.description||type.name}`.trim(), isString: true }
+    };
+
+    setProgress('바우처 파일을 만드는 중...');
+    const buffer = await buildVoucherFromTemplate(tplBuffer, {
+      inputCells, coverCells, images: [],
+      inputSheetName, coverSheetName
+    });
+
+    const periodSafe = sanitizeFilename(round.period_label);
+    const programSafe = sanitizeFilename(vLine.description || type.code || 'AR');
+    const fname = `AR Voucher_${periodSafe}_${programSafe}.xlsx`;
+    const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+
+    const { data: { user } } = await sb.auth.getUser();
+    await sb.from('vouchers').insert({ round_id: round.id, retailer_id: null, generated_by: user?.id || null });
+    await logAudit('AR_VOUCHER_GENERATE','ROUND',round.id,{label:round.period_label});
+
+    setProgress(`완료 — ${fname} 다운로드됨.`
+      + (unmatched.length ? `<br><span style="color:var(--accent-ar);">미배치: ${unmatched.join(', ')}</span>` : '')
+      + '<br>표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하세요.');
+  } catch(e){
+    console.error(e);
+    setProgress('<span style="color:var(--danger);">생성 실패: ' + e.message + '</span>');
+  }
+}
+
 // AR: 최종 확정
-async function finalizeARRound(round, type, disputes){
-  const raised = (disputes||[]).filter(d => d.status === 'RAISED').length;
+async function finalizeARRound(round, type, disputes){  const raised = (disputes||[]).filter(d => d.status === 'RAISED').length;
   if(raised > 0 && !confirm(`미처리 이의제기 ${raised}건이 있습니다. 그래도 확정할까요?`)) return;
   if(!confirm('최종 확정하면 리테일러는 더 이상 이의제기할 수 없습니다. 계속할까요?')) return;
   const { error } = await sb.from('rounds').update({ status:'FINALIZED' }).eq('id', round.id);
   if(error){ alert('확정 실패: ' + error.message); return; }
+  await logAudit('AR_FINALIZE','ROUND',round.id,{label:round.period_label});
   await renderRoundDetail();
 }
 
@@ -1506,6 +2238,7 @@ async function confirmRound(round, type, claims){
 
   const { error } = await sb.from('rounds').update({ status:'CONFIRMED', invoice_due_at, invoice_issue_date }).eq('id', round.id);
   if(error){ alert('확정 처리 실패: ' + error.message); return; }
+  await logAudit('ROUND_CONFIRM','ROUND',round.id,{label:`${type?.name||''} · ${round.period_label}`});
 
   // ④ 승인 완료된 리테일러에게 확정금액 + 계산서 발행 요청 안내
   const summary = buildRetailerSummary(claims).filter(g => g.approved === g.total && g.total > 0);
@@ -1522,6 +2255,7 @@ async function finalizeInvoices(round){
   if(notReady > 0 && !confirm(`아직 ${notReady}건이 계산서를 제출하지 않았습니다. 그래도 완료 처리할까요?`)) return;
   const { error } = await sb.from('rounds').update({ status:'INVOICED' }).eq('id', round.id);
   if(error){ alert('처리 실패: '+error.message); return; }
+  await logAudit('ROUND_INVOICED','ROUND',round.id,{label:round.period_label});
 
   // ⑥ 관리자에게 바우처 생성 준비 완료 알림
   try{
@@ -1581,7 +2315,7 @@ function setCellInSheetXml(xml, ref, value, isString){
   return { xml: xml.slice(0, m.index) + replacement + xml.slice(m.index + m[0].length), ok:true };
 }
 
-async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images }){
+async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images, inputSheetName, coverSheetName }){
   const zip = await JSZip.loadAsync(tplBuffer);
 
   // --- 시트 이름 → 파일 경로 매핑 (workbook.xml + rels) ---
@@ -1600,7 +2334,8 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
   while((sm = sheetRe.exec(wbXml))) sheetEntries.push({ name: sm[1], rid: sm[2], tag: sm[0] });
 
   const pathOf = (sheetName) => {
-    const e = sheetEntries.find(x => x.name === sheetName);
+    const e = sheetEntries.find(x => x.name === sheetName)
+           || sheetEntries.find(x => x.name.trim() === String(sheetName||'').trim()); // AR 템플릿은 시트명 끝에 공백이 있는 경우가 있음
     if(!e) return null;
     let t = relTargets[e.rid] || '';
     if(t.startsWith('/')) return t.slice(1);
@@ -1608,7 +2343,7 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
   };
 
   // --- 1) AP_input reqeust 금액 채우기 ---
-  const inputPath = pathOf('AP_input reqeust');
+  const inputPath = pathOf(inputSheetName || 'AP_input reqeust');
   if(inputPath && zip.file(inputPath)){
     let xml = await zip.file(inputPath).async('string');
     for(const [ref, val] of Object.entries(inputCells)){
@@ -1619,7 +2354,7 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
   }
 
   // --- 2) 표지(AP without PO) 날짜/설명 ---
-  const coverPath = pathOf('AP without PO');
+  const coverPath = pathOf(coverSheetName || 'AP without PO');
   if(coverPath && zip.file(coverPath)){
     let xml = await zip.file(coverPath).async('string');
     for(const [ref, cfg] of Object.entries(coverCells)){
@@ -1630,7 +2365,8 @@ async function buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, ima
   }
 
   // --- 3) 기존 'Tax invoice' 시트 제거 ---
-  const taxEntry = sheetEntries.find(x => x.name === 'Tax invoice');
+  // 세금계산서 이미지가 있는 경우에만 기존 'Tax invoice' 시트를 교체 (AR은 이미지가 없어 원본 유지)
+  const taxEntry = (images && images.length > 0) ? sheetEntries.find(x => x.name === 'Tax invoice') : null;
   if(taxEntry){
     const taxPath = pathOf('Tax invoice');
     wbXml = wbXml.replace(taxEntry.tag, '');
@@ -1718,8 +2454,248 @@ function sanitizeFilename(s){
 }
 
 
-async function renderVoucherSection(round, type, claims){
-  const voucherSection = document.getElementById('voucherSection');
+/* ================================================================
+   회차 아카이브
+   완료된 회차의 모든 파일 + 요약 + 이력을 폴더 구조 zip으로 내려받고,
+   확인 후 서버(Storage)에서 정리한다. DB에는 최종 금액 요약만 남긴다.
+   ================================================================ */
+
+// 이 회차에 속한 모든 파일 경로를 종류별로 수집
+function collectRoundFiles(claims, invoices, disputes){
+  const files = [];
+  const push = (folder, label, path) => { if(path) files.push({ folder, label, path }); };
+  (claims||[]).forEach(c => {
+    const rc = c.retailers?.code || '';
+    const ws = c.workshops?.name ? `_${c.workshops.name}` : '';
+    push('01_청구서', `${rc}${ws}`, c.file_path);
+    push('03_관리자첨부', `${rc}${ws}_반송자료`, c.detail?.admin_file_path);
+    push('03_관리자첨부', `${rc}${ws}_수정내역`, c.detail?.admin_correction_file_path);
+    push('04_AR근거자료', `${rc}_청구근거`, c.evidence_path);
+  });
+  (invoices||[]).forEach(i => push('02_세금계산서', i.retailers?.code || i.biz_no || '', i.file_path));
+  (disputes||[]).forEach(d => push('05_이의제기', `${d.retailers?.code||''}_근거`, d.evidence_path));
+  // 같은 파일이 여러 청구에 공유된 경우 중복 제거
+  const seen = new Set();
+  return files.filter(f => { if(seen.has(f.path)) return false; seen.add(f.path); return true; });
+}
+
+async function renderArchiveSection(round, type, claims){
+  const host = document.getElementById('voucherSection');
+  const card = document.createElement('div');
+  card.className = 'info-card';
+
+  if(round.status === 'ARCHIVED'){
+    const s = round.final_summary || {};
+    card.innerHTML = `
+      <div class="section-label" style="margin-top:0;">아카이브 완료</div>
+      <div class="hint">${fmtDate(round.archived_at)} · 파일 ${s.archived_files ?? '?'}건을 로컬로 내려받고 서버에서 정리했습니다.</div>
+      <div class="info-grid" style="margin-top:12px;">
+        <div class="info-item"><div class="k">최종 청구금액</div><div class="v">${fmtWon(s.total)}</div></div>
+        <div class="info-item"><div class="k">부가세</div><div class="v">${fmtWon(s.vat)}</div></div>
+        <div class="info-item"><div class="k">JG</div><div class="v">${fmtWon(s.jg)}</div></div>
+        <div class="info-item"><div class="k">LR</div><div class="v">${fmtWon(s.lr)}</div></div>
+      </div>`;
+    host.appendChild(card);
+    return;
+  }
+
+  const { data: invoices } = await sb.from('invoices').select('*, retailers(code,name)').eq('round_id', round.id);
+  const { data: disputes } = await sb.from('disputes').select('*, retailers(code)').eq('round_id', round.id);
+  const files = collectRoundFiles(claims, invoices, disputes);
+
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">아카이브 (서버 용량 정리)</div>
+    <div class="hint">
+      이 회차의 파일 <b>${files.length}건</b>을 폴더 구조 zip으로 내려받은 뒤, 서버에서 정리할 수 있습니다.<br>
+      정리 후에도 <b>최종 청구금액·리테일러별 금액·활동 이력은 DB에 그대로 남습니다.</b>
+    </div>
+    <div class="action-row">
+      <button class="btn" id="archiveDownloadBtn">① 전체 다운로드 (zip)</button>
+      <button class="btn btn-danger" id="archivePurgeBtn" disabled>② 서버 파일 정리</button>
+    </div>
+    <div class="hint" id="archiveProgress" style="margin-top:8px;"></div>`;
+  host.appendChild(card);
+
+  document.getElementById('archiveDownloadBtn')
+    .addEventListener('click', () => downloadRoundArchive(round, type, claims, invoices, disputes, files));
+  document.getElementById('archivePurgeBtn')
+    .addEventListener('click', () => purgeRoundFiles(round, type, claims, invoices, files));
+}
+
+async function downloadRoundArchive(round, type, claims, invoices, disputes, files){
+  const el = document.getElementById('archiveProgress');
+  const set = (m) => { el.innerHTML = m; };
+  try{
+    const zip = new JSZip();
+    const periodSafe = sanitizeFilename(round.period_label);
+    const programSafe = sanitizeFilename(type.voucher_lines?.[0]?.description || type.name || type.code);
+    const rootName = `${periodSafe}_${programSafe}`;
+    const root = zip.folder(rootName);
+
+    // 1) 파일 수집
+    let ok = 0, fail = 0;
+    for(let i=0; i<files.length; i++){
+      const f = files[i];
+      set(`파일 내려받는 중... ${i+1}/${files.length}`);
+      try{
+        const { data: signed } = await sb.storage.from('settlements').createSignedUrl(f.path, 120);
+        if(!signed) { fail++; continue; }
+        const buf = await (await fetch(signed.signedUrl)).arrayBuffer();
+        const ext = (f.path.split('.').pop()||'bin').split('?')[0];
+        root.folder(f.folder).file(`${sanitizeFilename(f.label)}.${ext}`, buf);
+        ok++;
+      } catch(e){ console.warn('파일 실패', f.path, e); fail++; }
+    }
+
+    // 2) 정산 요약 xlsx
+    set('정산 요약을 만드는 중...');
+    const isAR = type.direction === 'AR';
+    const rows = (claims||[]).map(c => {
+      const inv = (invoices||[]).find(i => i.retailer_id === c.retailer_id);
+      const base = {
+        '리테일러': c.retailers?.code || '',
+        '상호': c.retailers?.name || '',
+        '지점': c.workshops?.name || '',
+        '청구금액': Number(c.claimed_amount||0),
+        '확정금액': Number(c.approved_amount||0),
+        '상태': CLAIM_STATUS_LABEL[c.status] || c.status
+      };
+      if(isAR){
+        base['JG'] = Number(c.jg_amount||0);
+        base['LR'] = Number(c.lr_amount||0);
+        base['확인일시'] = c.confirmed_at ? new Date(c.confirmed_at).toLocaleString('ko-KR') : '';
+      } else {
+        base['세금계산서 공급가액'] = Number(inv?.supply_amount||0);
+        base['부가세'] = Number(inv?.vat||0);
+        base['제출일시'] = c.submitted_at ? new Date(c.submitted_at).toLocaleString('ko-KR') : '';
+      }
+      base['반송사유'] = c.reject_reason || '';
+      base['관리자코멘트'] = c.detail?.admin_note || '';
+      return base;
+    });
+    const wb = XLSX.utils.book_new();
+    const wsSum = XLSX.utils.json_to_sheet(rows);
+    if(rows.length){
+      const rng = XLSX.utils.decode_range(wsSum['!ref']);
+      Object.keys(rows[0]).forEach((k, ci) => {
+        if(!/금액|공급가액|부가세|JG|LR/.test(k)) return;
+        for(let ri=rng.s.r+1; ri<=rng.e.r; ri++){
+          const cell = wsSum[XLSX.utils.encode_cell({r:ri,c:ci})];
+          if(cell && cell.t === 'n') cell.z = '#,##0';
+        }
+      });
+      wsSum['!cols'] = Object.keys(rows[0]).map(k => ({ wch: Math.max(12, Math.min(24, k.length*2+4)) }));
+      wsSum['!autofilter'] = { ref: wsSum['!ref'] };
+    }
+    XLSX.utils.book_append_sheet(wb, wsSum, '정산요약');
+
+    // 회차 정보 시트
+    const info = [
+      ['정산 유형', type.name], ['유형코드', type.code], ['방향', type.direction],
+      ['회차', round.period_label], ['상태', ROUND_STATUS_LABEL[round.status]||round.status],
+      ['청구 마감', round.claim_due_at ? new Date(round.claim_due_at).toLocaleString('ko-KR') : ''],
+      ['계산서 발행일', round.invoice_issue_date || ''],
+      ['이의제기 마감', round.dispute_due_at ? new Date(round.dispute_due_at).toLocaleString('ko-KR') : ''],
+      ['총 확정금액', (claims||[]).reduce((s,c)=>s+Number(c.approved_amount||0),0)],
+      ['아카이브 생성', new Date().toLocaleString('ko-KR')]
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(info), '회차정보');
+
+    // 활동 이력 시트
+    const { data: logs } = await sb.from('audit_log')
+      .select('*, profiles(display_name)').eq('target_id', round.id).order('at');
+    const logRows = (logs||[]).map(l => ({
+      '일시': new Date(l.at).toLocaleString('ko-KR'),
+      '사용자': l.profiles?.display_name || '',
+      '활동': AUDIT_LABEL[l.action] || l.action,
+      '내용': l.payload?.label || '',
+      '금액': l.payload?.amount ?? '',
+      '사유': l.payload?.reason || ''
+    }));
+    if(logRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(logRows), '활동이력');
+
+    root.file(`${rootName}_정산요약.xlsx`, XLSX.write(wb, { bookType:'xlsx', type:'array' }));
+
+    // 3) 목록 텍스트
+    root.file('_파일목록.txt',
+      `${type.name} · ${round.period_label}\n생성: ${new Date().toLocaleString('ko-KR')}\n\n` +
+      files.map(f => `${f.folder}/${f.label}  ←  ${f.path}`).join('\n'));
+
+    set('압축하는 중...');
+    const blob = await zip.generateAsync({ type:'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${rootName}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+
+    document.getElementById('archivePurgeBtn').disabled = false;
+    set(`다운로드 완료 — 파일 ${ok}건${fail?` (실패 ${fail}건)`:''} + 정산요약 + 활동이력.<br>`
+      + `<b>zip 내용을 확인한 뒤</b> ②번 버튼으로 서버 파일을 정리하세요.`);
+  } catch(e){
+    console.error(e);
+    set(`<span style="color:var(--danger);">다운로드 실패: ${e.message}</span>`);
+  }
+}
+
+async function purgeRoundFiles(round, type, claims, invoices, files){
+  const el = document.getElementById('archiveProgress');
+  if(!confirm(`서버에서 파일 ${files.length}건을 삭제합니다.\n\n로컬에 내려받은 zip을 반드시 먼저 확인하세요. 삭제한 파일은 복구할 수 없습니다.\n\n계속할까요?`)) return;
+  if(!confirm('한 번 더 확인합니다. zip 파일을 열어서 내용이 정상인지 확인하셨나요?')) return;
+
+  try{
+    el.textContent = '서버 파일을 정리하는 중...';
+
+    // 1) 최종 요약을 DB에 남긴다 (파일이 사라져도 금액 근거는 유지)
+    const total = (claims||[]).reduce((s,c)=>s+Number(c.approved_amount||0),0);
+    const vat = (invoices||[]).reduce((s,i)=>s+Number(i.vat||0),0);
+    const jg = (claims||[]).reduce((s,c)=>s+Number(c.jg_amount||0),0);
+    const lr = (claims||[]).reduce((s,c)=>s+Number(c.lr_amount||0),0);
+    const byRetailer = new Map();
+    (claims||[]).forEach(c => {
+      const k = c.retailers?.code || c.retailer_id;
+      byRetailer.set(k, (byRetailer.get(k)||0) + Number(c.approved_amount||0));
+    });
+    const final_summary = {
+      total, vat, jg, lr, archived_files: files.length,
+      retailers: Array.from(byRetailer, ([code, amount]) => ({ code, amount }))
+    };
+
+    // 2) Storage 파일 삭제 (100개씩 나눠서)
+    const paths = files.map(f => f.path);
+    for(let i=0; i<paths.length; i+=100){
+      const chunk = paths.slice(i, i+100);
+      const { error } = await sb.storage.from('settlements').remove(chunk);
+      if(error) console.warn('일부 삭제 실패', error.message);
+    }
+
+    // 3) DB의 파일 경로 참조 제거 (금액은 그대로 둠)
+    for(const c of (claims||[])){
+      const detail = { ...(c.detail||{}) };
+      delete detail.admin_file_path; delete detail.admin_correction_file_path;
+      await sb.from('claims').update({ file_path:null, evidence_path:null, detail }).eq('id', c.id);
+    }
+    if(invoices && invoices.length){
+      await sb.from('invoices').update({ file_path:null }).eq('round_id', round.id);
+    }
+    await sb.from('disputes').update({ evidence_path:null }).eq('round_id', round.id);
+
+    // 4) 회차 상태 전환
+    const { error: rErr } = await sb.from('rounds').update({
+      status:'ARCHIVED', archived_at: new Date().toISOString(), final_summary
+    }).eq('id', round.id);
+    if(rErr) throw rErr;
+
+    await logAudit('ROUND_ARCHIVE','ROUND',round.id,{ label:`${type.name} · ${round.period_label}`, amount: total });
+    el.innerHTML = `<span style="color:var(--accent);">정리 완료 — 파일 ${files.length}건 삭제. 최종 금액 요약은 DB에 보존됩니다.</span>`;
+    await renderRoundDetail();
+  } catch(e){
+    console.error(e);
+    el.innerHTML = `<span style="color:var(--danger);">정리 실패: ${e.message}</span>`;
+  }
+}
+
+async function renderVoucherSection(round, type, claims){  const voucherSection = document.getElementById('voucherSection');
   const { data: invoices } = await sb.from('invoices').select('*, retailers(code,name)').eq('round_id', round.id);
   const ready = (invoices||[]).filter(i => ['SUBMITTED','ACCEPTED'].includes(i.status));
 
@@ -2065,6 +3041,7 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
 
     const { data: { user } } = await sb.auth.getUser();
     await sb.from('vouchers').insert({ round_id: round.id, retailer_id: null, generated_by: user?.id || null });
+    await logAudit('VOUCHER_GENERATE','ROUND',round.id,{label:round.period_label, amount: totalNet});
 
     setProgress('완료! zip 다운로드됨 (바우처 xlsx + rawdata). 표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하시면 인쇄영역 그대로 출력됩니다. 확인 후 [완료 처리]를 눌러주세요.');
   } catch(e){
@@ -2096,6 +3073,7 @@ async function openRound(round, type){
   if(insErr){ alert('청구 항목 생성 실패: ' + insErr.message); return; }
   const { error: updErr } = await sb.from('rounds').update({ status:'OPEN' }).eq('id', round.id);
   if(updErr){ alert('회차 개설 실패: ' + updErr.message); return; }
+  await logAudit('ROUND_OPEN','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
   await notifyRoundOpened(round, type, targetRetailerIds);   // ① 청구 요청 메일
   await renderRoundDetail();
 }
@@ -2208,6 +3186,7 @@ async function submitDispute(wrap, round, claim){
     reason, requested_amount: requested, evidence_path: evidencePath
   });
   if(error){ alert('이의제기 실패: ' + error.message); return; }
+  await logAudit('DISPUTE_RAISE','ROUND',round.id,{label:myRetailer?.code||'', reason, amount:requested});
 
   // 관리자 알림
   try{
@@ -2375,6 +3354,7 @@ async function loadRetailerClaims(){
           status: 'NOT_SUBMITTED', submitted_at: null, claimed_amount: null, file_path: null
         }).eq('id', btn.dataset.claimId);
         if(error){ alert('취소 실패: ' + error.message); return; }
+        await logAudit('CLAIM_CANCEL','CLAIM',btn.dataset.claimId,{label:myRetailer?.code||''});
         await loadRetailerClaims();
       });
     });
@@ -2395,6 +3375,7 @@ async function loadRetailerClaims(){
         if(filePath) payload.file_path = filePath;
         const { error } = await sb.from('claims').update(payload).eq('id', btn.dataset.claimId);
         if(error){ alert('재청구 실패: ' + error.message); return; }
+        await logAudit('CLAIM_RESUBMIT','CLAIM',btn.dataset.claimId,{label:myRetailer?.code||'', amount});
         await notifyOnRetailerSubmit(round.id);   // ② 재청구도 관리자에게 알림
         await loadRetailerClaims();
       });
@@ -2527,6 +3508,7 @@ async function submitInvoice(round, supplyAmount, rowEl){
   }
   if(error){ alert('제출 실패: ' + error.message); return; }
 
+  await logAudit('INVOICE_SUBMIT','ROUND',round.id,{label:myRetailer?.code||'', amount: supplyAmount});
   // ⑤ 관리자에게 세금계산서 제출 알림
   await notifyInvoiceSubmitted(round, myRetailer?.code || '', supplyAmount, vat);
 
@@ -2560,6 +3542,7 @@ async function submitGroup(card, items, file){
     if(error){ alert('제출 실패 (일부 항목): ' + error.message); }
   }
 
+  await logAudit('CLAIM_SUBMIT','ROUND',items[0].round_id,{label:myRetailer?.code||'', amount: updates.reduce((s,u)=>s+u.amount,0)});
   // ② 관리자 알림 — 전원 제출 완료 여부를 DB에서 다시 세어 판정
   await notifyOnRetailerSubmit(items[0].round_id);
 
