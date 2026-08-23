@@ -360,6 +360,9 @@
     </div>
     <div class="field"><label>기간 라벨</label><input id="r_period_label" placeholder="예: FY27 Q1"></div>
     <div class="field"><label>청구 마감일시</label><input id="r_claim_due_at" type="datetime-local"></div>
+    <div class="hint" id="r_ar_hint" style="display:none; color:var(--accent-ar);">
+      ※ AR(JLRK가 청구하는 유형)은 청구 마감일시를 쓰지 않습니다. 회차 생성 후 상세화면에서 청구금액·근거를 입력하고, 이의제기 마감일시를 설정하게 됩니다.
+    </div>
     <div class="hint">개설(리테일러 공개)은 목록에서 회차를 만든 뒤, 상세화면에서 별도로 진행합니다.</div>
   </div>
   <div class="panel-foot">
@@ -467,6 +470,173 @@ function matchWorkshop(label){
 
 const CLAIM_STATUS_LABEL = { NOT_SUBMITTED:'미제출', SUBMITTED:'제출됨', REJECTED:'반송', APPROVED:'승인', CANCELLED:'취소' };
 const ROUND_STATUS_LABEL = { DRAFT:'준비중', OPEN:'접수중', CLOSED:'검토중', CONFIRMED:'확정공지', INVOICED:'계산서접수', VOUCHERED:'완료', PUBLISHED:'공지됨', FINALIZED:'확정', ARCHIVED:'종료' };
+
+/* ================================================================
+   이메일 알림
+   Edge Function('send-email')이 아직 배포되지 않았어도 화면 동작이
+   멈추지 않도록, 실패는 조용히 삼키고 콘솔에만 남긴다.
+   ================================================================ */
+const EMAIL_STYLE = `font-family:'Malgun Gothic',sans-serif;font-size:14px;color:#222;line-height:1.6;`;
+
+function emailShell(title, bodyHtml){
+  return `<div style="${EMAIL_STYLE}max-width:600px;">
+    <div style="border-bottom:2px solid #2f9e78;padding-bottom:8px;margin-bottom:16px;">
+      <span style="font-weight:700;font-size:16px;">JLRK 정산 포털</span>
+      <span style="color:#888;font-size:12px;margin-left:8px;">Settlement Portal</span>
+    </div>
+    <h2 style="font-size:16px;margin:0 0 12px;">${title}</h2>
+    ${bodyHtml}
+    <div style="margin-top:24px;padding-top:12px;border-top:1px solid #eee;color:#888;font-size:12px;">
+      이 메일은 JLRK 정산 포털에서 자동 발송되었습니다.
+    </div>
+  </div>`;
+}
+
+// 실제 발송. 실패해도 예외를 던지지 않음 (알림 실패가 업무 흐름을 막으면 안 됨)
+async function sendEmail(to, subject, html){
+  try{
+    const recipients = (Array.isArray(to) ? to : [to])
+      .filter(e => e && !/placeholder@example\.com/i.test(e));
+    if(recipients.length === 0){ console.warn('[알림] 수신자 없음 — 발송 생략:', subject); return false; }
+    const { data, error } = await sb.functions.invoke('send-email', {
+      body: { to: recipients, subject, html }
+    });
+    if(error){ console.warn('[알림] 발송 실패:', subject, error.message); return false; }
+    console.log('[알림] 발송 완료:', subject, data);
+    return true;
+  } catch(e){
+    console.warn('[알림] 발송 예외:', subject, e);
+    return false;
+  }
+}
+
+// 관리자 알림 수신 주소 조회
+async function getAdminEmails(){
+  const { data } = await sb.from('profiles').select('notify_email').eq('role','ADMIN');
+  return (data||[]).map(p => p.notify_email).filter(Boolean);
+}
+
+// 특정 리테일러들의 수신 주소 조회
+async function getRetailerEmails(retailerIds){
+  if(!retailerIds || retailerIds.length === 0) return [];
+  const { data } = await sb.from('retailers').select('email').in('id', retailerIds);
+  return (data||[]).map(r => r.email).filter(Boolean);
+}
+
+const fmtWon = (n) => Number(n||0).toLocaleString('ko-KR') + '원';
+const fmtDate = (d) => d ? new Date(d).toLocaleString('ko-KR') : '미설정';
+
+/* ---------- 알림 시나리오별 발송 함수 ---------- */
+
+// Edge Function 배포 여부를 확인해 안내 문구를 갱신
+async function checkEmailStatus(){
+  const el = document.getElementById('rd_email_hint');
+  if(!el) return;
+  try{
+    const { error } = await sb.functions.invoke('send-email', { body: { ping: true } });
+    // 함수가 배포돼 있으면 파라미터 부족(400) 응답이 오고, 미배포면 404/네트워크 오류
+    if(error && /not found|404|failed to fetch|networkerror/i.test(error.message || '')){
+      el.textContent = '※ 이메일 알림 미연결 — Edge Function(send-email) 배포 전입니다. 개설 후 리테일러에 별도 안내해주세요.';
+      el.style.color = 'var(--accent-ar)';
+    } else {
+      el.textContent = '✓ 이메일 알림 연결됨 — 개설 시 대상 리테일러에게 청구 요청 메일이 자동 발송됩니다.';
+      el.style.color = 'var(--accent)';
+    }
+  } catch(e){
+    el.textContent = '※ 이메일 알림 상태를 확인할 수 없습니다.';
+  }
+}
+
+// ① 회차 개설 → 대상 리테일러 전체에 청구 요청
+async function notifyRoundOpened(round, type, retailerIds){
+  const emails = await getRetailerEmails(retailerIds);
+  const html = emailShell('청구서 제출 요청', `
+    <table style="${EMAIL_STYLE}border-collapse:collapse;">
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td><b>${type.name}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">제출 마감</td><td><b style="color:#c0392b;">${fmtDate(round.claim_due_at)}</b></td></tr>
+    </table>
+    <p style="margin-top:16px;">정산 포털에 접속하여 청구서를 업로드해주세요. 마감 시각이 지나면 제출이 불가합니다.</p>`);
+  return sendEmail(emails, `[JLRK 정산] ${round.period_label} ${type.name} 청구서 제출 요청`, html);
+}
+
+// ② 리테일러 제출 → 관리자에게 알림 (전원 완료 시 별도 문구)
+async function notifyClaimSubmitted(round, type, retailerCode, submitted, total){
+  const emails = await getAdminEmails();
+  const allDone = submitted >= total;
+  const title = allDone ? '전원 제출 완료 — 검토 요청' : '청구서 제출됨';
+  const html = emailShell(title, `
+    <table style="${EMAIL_STYLE}border-collapse:collapse;">
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td><b>${type?.name||''}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">제출 리테일러</td><td><b>${retailerCode}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">진행 현황</td><td><b>${submitted} / ${total}</b></td></tr>
+    </table>
+    ${allDone ? '<p style="margin-top:16px;color:#2f9e78;"><b>모든 대상이 제출을 완료했습니다. 검토를 진행해주세요.</b></p>'
+              : '<p style="margin-top:16px;">포털에서 제출 내역을 확인할 수 있습니다.</p>'}`);
+  return sendEmail(emails, `[JLRK 정산] ${round.period_label} ${retailerCode} 제출 (${submitted}/${total})${allDone?' — 검토 요청':''}`, html);
+}
+
+// ③ 반송 → 해당 리테일러에게만
+async function notifyClaimRejected(round, type, retailerId, reason, suggestedAmount){
+  const emails = await getRetailerEmails([retailerId]);
+  const html = emailShell('청구서 반송 안내', `
+    <table style="${EMAIL_STYLE}border-collapse:collapse;">
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td><b>${type?.name||''}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">반송 사유</td><td style="color:#c0392b;"><b>${reason||''}</b></td></tr>
+      ${suggestedAmount!=null?`<tr><td style="padding:4px 12px 4px 0;color:#666;">관리자 제안금액</td><td><b>${fmtWon(suggestedAmount)}</b></td></tr>`:''}
+    </table>
+    <p style="margin-top:16px;">포털에서 사유와 첨부파일을 확인하신 후 재청구해주세요.</p>`);
+  return sendEmail(emails, `[JLRK 정산] ${round.period_label} 청구서 반송 안내`, html);
+}
+
+// ④ 확정금액 공지 → 대상 리테일러 전체에 세금계산서 요청
+async function notifyRoundConfirmed(round, type, retailerTotals){
+  for(const rt of retailerTotals){
+    const emails = await getRetailerEmails([rt.retailer_id]);
+    if(emails.length === 0) continue;
+    const html = emailShell('정산금액 확정 및 세금계산서 발행 요청', `
+      <table style="${EMAIL_STYLE}border-collapse:collapse;">
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td><b>${type?.name||''}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">확정 공급가액</td><td><b style="font-size:16px;color:#2f9e78;">${fmtWon(rt.supply_amount)}</b></td></tr>
+        ${round.invoice_issue_date?`<tr><td style="padding:4px 12px 4px 0;color:#666;">계산서 발행일</td><td><b style="color:#c0392b;">${round.invoice_issue_date}</b></td></tr>`:''}
+        ${round.invoice_due_at?`<tr><td style="padding:4px 12px 4px 0;color:#666;">계산서 제출 마감</td><td><b>${fmtDate(round.invoice_due_at)}</b></td></tr>`:''}
+      </table>
+      <p style="margin-top:16px;">위 금액으로 세금계산서를 발행하신 후 포털에 업로드해주세요.
+      ${round.invoice_issue_date?`<br><b style="color:#c0392b;">발행일자는 반드시 ${round.invoice_issue_date}로 지정해주세요.</b>`:''}</p>`);
+    await sendEmail(emails, `[JLRK 정산] ${round.period_label} 정산금액 확정 — 세금계산서 발행 요청`, html);
+  }
+  return true;
+}
+
+// ⑤ 세금계산서 제출 → 관리자에게
+async function notifyInvoiceSubmitted(round, retailerCode, supplyAmount, vat){
+  const emails = await getAdminEmails();
+  const html = emailShell('세금계산서 제출됨', `
+    <table style="${EMAIL_STYLE}border-collapse:collapse;">
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">리테일러</td><td><b>${retailerCode||''}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">공급가액</td><td><b>${fmtWon(supplyAmount)}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">부가세</td><td><b>${fmtWon(vat)}</b></td></tr>
+    </table>
+    <p style="margin-top:16px;">포털에서 계산서 파일을 확인할 수 있습니다.</p>`);
+  return sendEmail(emails, `[JLRK 정산] ${round.period_label} ${retailerCode||''} 세금계산서 제출`, html);
+}
+
+// ⑥ 계산서 전원 접수 → 관리자에게 바우처 생성 안내
+async function notifyReadyForVoucher(round, type){
+  const emails = await getAdminEmails();
+  const html = emailShell('세금계산서 접수 완료 — 바우처 생성 가능', `
+    <table style="${EMAIL_STYLE}border-collapse:collapse;">
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td><b>${type?.name||''}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+    </table>
+    <p style="margin-top:16px;">포털 회차 상세 화면에서 <b>[바우처 생성]</b>을 진행할 수 있습니다.</p>`);
+  return sendEmail(emails, `[JLRK 정산] ${round.period_label} 바우처 생성 준비 완료`, html);
+}
+
 
 /* ---------- 로그인 ---------- */
 const loginScreen = document.getElementById('loginScreen');
@@ -727,8 +897,8 @@ async function loadRounds(){
       <td>${r.period_label}</td>
       <td class="muted">${r.settlement_types?.name || '—'}</td>
       <td><span class="badge ${r.settlement_types?.direction==='AP'?'badge-ap':'badge-ar'}">${r.settlement_types?.direction||''}</span></td>
-      <td><span class="badge ${r.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[r.status]||r.status}</span></td>
-      <td class="muted">${r.claim_due_at ? new Date(r.claim_due_at).toLocaleString('ko-KR') : '—'}</td>
+      <td><span class="badge ${r.status==='DRAFT'?'badge-off':(r.settlement_types?.direction==='AR'?'badge-ar':'badge-ap')}">${ROUND_STATUS_LABEL[r.status]||r.status}</span></td>
+      <td class="muted">${r.settlement_types?.direction==='AR' ? (r.dispute_due_at ? new Date(r.dispute_due_at).toLocaleString('ko-KR')+' (이의)' : '—') : (r.claim_due_at ? new Date(r.claim_due_at).toLocaleString('ko-KR') : '—')}</td>
       <td>${total ? `${submitted||0} / ${total}` : '—'}</td>`;
     tbody.appendChild(tr);
   }
@@ -740,8 +910,19 @@ document.getElementById('newRoundBtn').addEventListener('click', () => {
   document.getElementById('r_period_label').value = '';
   document.getElementById('r_claim_due_at').value = '';
   if(activeTypes.length === 0){ alert('먼저 [정산 유형 관리]에서 유형을 하나 만들어야 합니다.'); return; }
+  updateRoundPanelForType();
   openPanel('roundPanel');
 });
+
+// 선택한 유형이 AR이면 청구 마감일시 입력을 숨기고 안내를 표시
+function updateRoundPanelForType(){
+  const typeId = document.getElementById('r_type_id').value;
+  const t = activeTypes.find(x => x.id === typeId);
+  const isAR = t?.direction === 'AR';
+  document.getElementById('r_claim_due_at').closest('.field').style.display = isAR ? 'none' : 'block';
+  document.getElementById('r_ar_hint').style.display = isAR ? 'block' : 'none';
+}
+document.getElementById('r_type_id').addEventListener('change', updateRoundPanelForType);
 
 document.getElementById('saveRoundBtn').addEventListener('click', async () => {
   const type_id = document.getElementById('r_type_id').value;
@@ -769,6 +950,10 @@ async function renderRoundDetail(){
   if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
   const type = round.settlement_types;
 
+  // AR(JLRK → 리테일러 청구)은 흐름이 반대라 별도 화면으로 분기
+  if(type.direction === 'AR'){ return renderARRoundDetail(round, type); }
+  document.getElementById('claimsTable').style.display = 'table'; // AR에서 돌아온 경우 복구
+
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
   document.getElementById('rd_status').innerHTML = `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
   document.getElementById('rd_meta').textContent = `${type.direction} · ${type.claim_unit==='RETAILER'?'법인단위':'지점단위'}`;
@@ -793,7 +978,9 @@ async function renderRoundDetail(){
     actions.appendChild(btn);
     const hint = document.createElement('div');
     hint.className = 'hint'; hint.style.marginTop='8px';
-    hint.textContent = '※ 이메일 자동 발송은 아직 연결되지 않았습니다 — 개설 후 별도로 리테일러에 안내해주세요.';
+    hint.id = 'rd_email_hint';
+    hint.textContent = '※ 이메일 알림 상태 확인 중...';
+    checkEmailStatus();
     actions.appendChild(hint);
   } else if(round.status === 'OPEN'){
     const btn = document.createElement('button');
@@ -1003,6 +1190,14 @@ async function rejectClaim(rowEl){
 
   const { error } = await sb.from('claims').update(payload).eq('id', claimId);
   if(error){ alert('반송 실패: ' + error.message); return; }
+
+  // ③ 해당 리테일러에게만 반송 안내
+  try{
+    const { data: rd } = await sb.from('rounds')
+      .select('id, period_label, settlement_types(name)').eq('id', claimRow.round_id).single();
+    if(rd) await notifyClaimRejected(rd, rd.settlement_types, claimRow.retailer_id, reason, suggestedAmount);
+  } catch(e){ console.warn('[알림] 반송 알림 실패', e); }
+
   await renderRoundDetail();
 }
 
@@ -1016,6 +1211,282 @@ function buildRetailerSummary(claims){
     if(c.status === 'APPROVED'){ g.approved++; g.supply_amount += Number(c.approved_amount||0); }
   });
   return Array.from(map.values());
+}
+
+/* ================================================================
+   Phase 6 — AR Voucher (JLRK → 리테일러 청구)
+   흐름: DRAFT(금액·근거 입력) → PUBLISHED(공지, 확인/이의제기 접수)
+        → 이의제기 승인/반려 → FINALIZED(최종 확정)
+   ================================================================ */
+async function renderARRoundDetail(round, type){
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  document.getElementById('rd_status').innerHTML =
+    `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ar'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent = 'AR · JLRK가 리테일러에 청구';
+  document.getElementById('rd_due').textContent = round.dispute_due_at
+    ? new Date(round.dispute_due_at).toLocaleString('ko-KR') + ' (이의제기 마감)' : '이의제기 마감 미설정';
+
+  const { data: claims } = await sb.from('claims')
+    .select('*, retailers(code,name,email)')
+    .eq('round_id', round.id).order('created_at');
+  const { data: disputes } = await sb.from('disputes')
+    .select('*, retailers(code,name)').eq('round_id', round.id);
+  const disputeByRetailer = new Map((disputes||[]).map(d => [d.retailer_id, d]));
+
+  const total = claims?.length || 0;
+  const confirmed = (claims||[]).filter(c => c.confirmed_at).length;
+  const raised = (disputes||[]).filter(d => d.status === 'RAISED').length;
+  document.getElementById('rd_progress').textContent = total
+    ? `확인 ${confirmed} / ${total}${raised ? ` · 이의제기 ${raised}건` : ''}` : '대상 없음';
+
+  const actions = document.getElementById('rd_actions');
+  const reviewSection = document.getElementById('reviewSection');
+  const invoiceSection = document.getElementById('invoiceSection');
+  const voucherSection = document.getElementById('voucherSection');
+  actions.innerHTML = ''; reviewSection.innerHTML = '';
+  invoiceSection.innerHTML = ''; voucherSection.innerHTML = '';
+
+  /* ---------- DRAFT: 청구 대상 생성 + 금액/근거 입력 ---------- */
+  if(round.status === 'DRAFT'){
+    if(total === 0){
+      const btn = document.createElement('button');
+      btn.className = 'btn'; btn.textContent = '청구 대상 생성 (대상 리테일러 불러오기)';
+      btn.addEventListener('click', () => createARTargets(round, type));
+      actions.appendChild(btn);
+    } else {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `
+        <div class="row2" style="max-width:420px;">
+          <div class="field"><label>이의제기 마감일시 (선택)</label><input type="datetime-local" id="ar_dispute_due"></div>
+        </div>
+        <div class="hint" style="margin-bottom:8px;">마감이 지나면 자동으로 확정 처리됩니다. 비워두면 수동으로 확정해야 합니다.</div>
+        <button class="btn" id="publishARBtn">리테일러에 청구 공지</button>`;
+      actions.appendChild(wrap);
+      document.getElementById('publishARBtn').addEventListener('click', () => publishARRound(round, type, claims));
+
+      const card = document.createElement('div');
+      card.className = 'info-card';
+      card.innerHTML = `<div class="section-label" style="margin-top:0;">청구금액 입력 (${total}개사)</div>`;
+      const tbl = document.createElement('table');
+      tbl.innerHTML = `<thead><tr><th>리테일러</th><th>청구금액</th><th>근거자료</th><th></th></tr></thead><tbody></tbody>`;
+      const tb = tbl.querySelector('tbody');
+      (claims||[]).forEach(c => {
+        const tr = document.createElement('tr');
+        tr.dataset.claimId = c.id;
+        tr.innerHTML = `
+          <td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+          <td><input type="text" inputmode="numeric" class="row-amt-input ar-amt-input" style="width:130px;" value="${c.approved_amount!=null?Number(c.approved_amount).toLocaleString('ko-KR'):''}"></td>
+          <td>${c.evidence_path
+              ? `<span class="file-link" data-path="${c.evidence_path}">첨부됨</span> <input type="file" class="ar-file-input" style="font-size:11px;width:120px;">`
+              : `<input type="file" class="ar-file-input" style="font-size:11px;width:150px;">`}</td>
+          <td><button class="btn btn-sm ar-save-btn">저장</button></td>`;
+        tb.appendChild(tr);
+      });
+      card.appendChild(tbl);
+      actions.parentElement.appendChild(card);
+      card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+      card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+      card.querySelectorAll('.ar-save-btn').forEach(btn => {
+        btn.addEventListener('click', () => saveARClaim(btn.closest('tr'), round));
+      });
+    }
+  }
+
+  /* ---------- PUBLISHED: 확인 현황 + 이의제기 처리 ---------- */
+  if(round.status === 'PUBLISHED'){
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="hint" style="margin-bottom:8px;">
+        확인 ${confirmed}/${total}${raised?` · <b style="color:var(--accent-ar);">미처리 이의제기 ${raised}건</b>`:''}
+      </div>
+      <button class="btn" id="finalizeARBtn">최종 확정 (이의제기 종결)</button>`;
+    actions.appendChild(wrap);
+    document.getElementById('finalizeARBtn').addEventListener('click', () => finalizeARRound(round, type, disputes));
+
+    // 이의제기 처리
+    const raisedList = (disputes||[]).filter(d => d.status === 'RAISED');
+    if(raisedList.length > 0){
+      const card = document.createElement('div');
+      card.className = 'info-card';
+      card.innerHTML = `<div class="section-label" style="margin-top:0;">이의제기 처리 (${raisedList.length}건)</div>`;
+      const tbl = document.createElement('table');
+      tbl.innerHTML = `<thead><tr><th>리테일러</th><th>기존 청구금액</th><th>요청금액</th><th>사유</th><th>근거</th><th>처리</th></tr></thead><tbody></tbody>`;
+      const tb = tbl.querySelector('tbody');
+      raisedList.forEach(d => {
+        const c = (claims||[]).find(x => x.retailer_id === d.retailer_id);
+        const tr = document.createElement('tr');
+        tr.dataset.disputeId = d.id;
+        tr.dataset.claimId = c?.id || '';
+        tr.innerHTML = `
+          <td>${d.retailers?.code||''}</td>
+          <td class="muted">${fmtWon(c?.approved_amount)}</td>
+          <td><input type="text" inputmode="numeric" class="row-amt-input dispute-amt-input" style="width:120px;" value="${d.requested_amount!=null?Number(d.requested_amount).toLocaleString('ko-KR'):''}"></td>
+          <td style="max-width:220px;white-space:normal;">${d.reason||''}</td>
+          <td>${d.evidence_path?`<span class="file-link" data-path="${d.evidence_path}">다운로드</span>`:'—'}</td>
+          <td style="white-space:nowrap;">
+            <button class="btn btn-sm dispute-approve-btn">승인(금액수정)</button>
+            <button class="btn btn-ghost btn-sm dispute-reject-btn" style="margin-left:6px;">반려</button>
+          </td>`;
+        tb.appendChild(tr);
+      });
+      card.appendChild(tbl);
+      reviewSection.appendChild(card);
+      card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+      card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+      card.querySelectorAll('.dispute-approve-btn').forEach(b => b.addEventListener('click', () => decideDispute(b.closest('tr'), true, round, type)));
+      card.querySelectorAll('.dispute-reject-btn').forEach(b => b.addEventListener('click', () => decideDispute(b.closest('tr'), false, round, type)));
+    }
+  }
+
+  /* ---------- 전체 현황표 ---------- */
+  const listCard = document.createElement('div');
+  listCard.className = 'info-card';
+  listCard.innerHTML = `<div class="section-label" style="margin-top:0;">청구 현황</div>`;
+  if(total === 0){
+    listCard.innerHTML += '<div class="hint">아직 청구 대상이 생성되지 않았습니다.</div>';
+  } else {
+    const tbl = document.createElement('table');
+    tbl.innerHTML = `<thead><tr><th>리테일러</th><th>청구금액</th><th>상태</th><th>근거자료</th></tr></thead><tbody></tbody>`;
+    const tb = tbl.querySelector('tbody');
+    (claims||[]).forEach(c => {
+      const d = disputeByRetailer.get(c.retailer_id);
+      let badge;
+      if(d && d.status === 'RAISED') badge = '<span class="badge badge-warn">이의제기</span>';
+      else if(d && d.status === 'APPROVED') badge = '<span class="badge badge-ap">이의 승인(금액수정)</span>';
+      else if(d && d.status === 'REJECTED') badge = '<span class="badge badge-danger">이의 반려</span>';
+      else if(c.confirmed_at) badge = '<span class="badge badge-ap">확인완료</span>';
+      else badge = '<span class="badge badge-off">미확인</span>';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+        <td><b>${fmtWon(c.approved_amount)}</b></td>
+        <td>${badge}${d?.decision_note?`<div class="hint">${d.decision_note}</div>`:''}</td>
+        <td>${c.evidence_path?`<span class="file-link" data-path="${c.evidence_path}">다운로드</span>`:'—'}</td>`;
+      tb.appendChild(tr);
+    });
+    const sum = (claims||[]).reduce((s,c)=>s+Number(c.approved_amount||0),0);
+    tbl.innerHTML += `<tfoot><tr><td style="text-align:right;">합계</td><td><b>${fmtWon(sum)}</b></td><td colspan="2"></td></tr></tfoot>`;
+    listCard.appendChild(tbl);
+  }
+  voucherSection.appendChild(listCard);
+  listCard.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+
+  document.getElementById('claimsTable').style.display = 'none';
+}
+
+// AR: 대상 리테일러로 청구 행 생성
+async function createARTargets(round, type){
+  let targets = type.target_retailers;
+  if(!targets || targets.length === 0){
+    const { data: all } = await sb.from('retailers').select('id').eq('is_active', true);
+    targets = (all||[]).map(r => r.id);
+  }
+  if(targets.length === 0){ alert('대상 리테일러가 없습니다.'); return; }
+  const rows = targets.map(rid => ({ round_id: round.id, retailer_id: rid, status:'NOT_SUBMITTED' }));
+  const { error } = await sb.from('claims').insert(rows);
+  if(error){ alert('생성 실패: ' + error.message); return; }
+  await renderRoundDetail();
+}
+
+// AR: 리테일러별 청구금액·근거 저장
+async function saveARClaim(rowEl, round){
+  const claimId = rowEl.dataset.claimId;
+  const amount = readAmountInput(rowEl.querySelector('.ar-amt-input'));
+  if(amount == null){ alert('청구금액을 입력해주세요.'); return; }
+  const file = rowEl.querySelector('.ar-file-input')?.files[0];
+
+  const payload = { approved_amount: amount };
+  if(file){
+    const { data: c } = await sb.from('claims').select('retailer_id').eq('id', claimId).single();
+    const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    const path = `${c.retailer_id}/${round.id}/AR-EVIDENCE-${claimId}-${Date.now()}-${safeName}`;
+    const { error: upErr } = await sb.storage.from('settlements').upload(path, file, { upsert:true });
+    if(upErr){ alert('근거자료 업로드 실패: ' + upErr.message); return; }
+    payload.evidence_path = path;
+  }
+  const { error } = await sb.from('claims').update(payload).eq('id', claimId);
+  if(error){ alert('저장 실패: ' + error.message); return; }
+  await renderRoundDetail();
+}
+
+// AR: 공지
+async function publishARRound(round, type, claims){
+  const missing = (claims||[]).filter(c => c.approved_amount == null);
+  if(missing.length > 0 && !confirm(`청구금액이 입력되지 않은 리테일러가 ${missing.length}곳 있습니다. 그래도 공지할까요?`)) return;
+  const dueInput = document.getElementById('ar_dispute_due');
+  const dispute_due_at = dueInput?.value ? new Date(dueInput.value).toISOString() : null;
+  const { error } = await sb.from('rounds').update({ status:'PUBLISHED', dispute_due_at }).eq('id', round.id);
+  if(error){ alert('공지 실패: ' + error.message); return; }
+
+  // 리테일러별 개별 청구 안내 메일 (타사 금액 노출 방지)
+  for(const c of (claims||[])){
+    if(c.approved_amount == null) continue;
+    const emails = await getRetailerEmails([c.retailer_id]);
+    if(emails.length === 0) continue;
+    const html = emailShell('청구 안내 (AR)', `
+      <table style="${EMAIL_STYLE}border-collapse:collapse;">
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">정산 유형</td><td><b>${type.name}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">청구금액</td><td><b style="font-size:16px;color:#d99a3d;">${fmtWon(c.approved_amount)}</b></td></tr>
+        ${dispute_due_at?`<tr><td style="padding:4px 12px 4px 0;color:#666;">이의제기 마감</td><td><b>${fmtDate(dispute_due_at)}</b></td></tr>`:''}
+      </table>
+      <p style="margin-top:16px;">포털에서 근거자료를 확인하신 후 <b>확인</b> 처리해주세요.
+      금액에 이의가 있으시면 마감 전까지 사유와 근거를 첨부해 이의제기해주시기 바랍니다.</p>`);
+    await sendEmail(emails, `[JLRK 정산] ${round.period_label} ${type.name} 청구 안내`, html);
+  }
+  await renderRoundDetail();
+}
+
+// AR: 이의제기 승인/반려
+async function decideDispute(rowEl, approve, round, type){
+  const disputeId = rowEl.dataset.disputeId;
+  const claimId = rowEl.dataset.claimId;
+  const note = prompt(approve ? '승인 사유(선택):' : '반려 사유를 입력해주세요:', '');
+  if(!approve && !note){ alert('반려 시에는 사유가 필요합니다.'); return; }
+
+  const { data: { user } } = await sb.auth.getUser();
+  const payload = {
+    status: approve ? 'APPROVED' : 'REJECTED',
+    decision_note: note || null,
+    decided_by: user?.id || null,
+    decided_at: new Date().toISOString()
+  };
+  const { error } = await sb.from('disputes').update(payload).eq('id', disputeId);
+  if(error){ alert('처리 실패: ' + error.message); return; }
+
+  let newAmount = null;
+  if(approve && claimId){
+    newAmount = readAmountInput(rowEl.querySelector('.dispute-amt-input'));
+    if(newAmount != null){
+      await sb.from('claims').update({ approved_amount: newAmount, confirmed_at: new Date().toISOString() }).eq('id', claimId);
+    }
+  }
+
+  // 해당 리테일러에게 결과 통보
+  try{
+    const { data: d } = await sb.from('disputes').select('retailer_id').eq('id', disputeId).single();
+    const emails = await getRetailerEmails([d.retailer_id]);
+    const html = emailShell(approve ? '이의제기 승인 안내' : '이의제기 반려 안내', `
+      <table style="${EMAIL_STYLE}border-collapse:collapse;">
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">처리 결과</td><td><b style="color:${approve?'#2f9e78':'#c0392b'};">${approve?'승인':'반려'}</b></td></tr>
+        ${approve && newAmount!=null?`<tr><td style="padding:4px 12px 4px 0;color:#666;">수정된 청구금액</td><td><b>${fmtWon(newAmount)}</b></td></tr>`:''}
+        ${note?`<tr><td style="padding:4px 12px 4px 0;color:#666;">사유</td><td>${note}</td></tr>`:''}
+      </table>`);
+    await sendEmail(emails, `[JLRK 정산] ${round.period_label} 이의제기 ${approve?'승인':'반려'} 안내`, html);
+  } catch(e){ console.warn('[알림] 이의제기 결과 통보 실패', e); }
+
+  await renderRoundDetail();
+}
+
+// AR: 최종 확정
+async function finalizeARRound(round, type, disputes){
+  const raised = (disputes||[]).filter(d => d.status === 'RAISED').length;
+  if(raised > 0 && !confirm(`미처리 이의제기 ${raised}건이 있습니다. 그래도 확정할까요?`)) return;
+  if(!confirm('최종 확정하면 리테일러는 더 이상 이의제기할 수 없습니다. 계속할까요?')) return;
+  const { error } = await sb.from('rounds').update({ status:'FINALIZED' }).eq('id', round.id);
+  if(error){ alert('확정 실패: ' + error.message); return; }
+  await renderRoundDetail();
 }
 
 async function confirmRound(round, type, claims){
@@ -1035,6 +1506,13 @@ async function confirmRound(round, type, claims){
 
   const { error } = await sb.from('rounds').update({ status:'CONFIRMED', invoice_due_at, invoice_issue_date }).eq('id', round.id);
   if(error){ alert('확정 처리 실패: ' + error.message); return; }
+
+  // ④ 승인 완료된 리테일러에게 확정금액 + 계산서 발행 요청 안내
+  const summary = buildRetailerSummary(claims).filter(g => g.approved === g.total && g.total > 0);
+  await notifyRoundConfirmed(
+    { ...round, invoice_due_at, invoice_issue_date }, type, summary
+  );
+
   await renderRoundDetail();
 }
 
@@ -1044,6 +1522,14 @@ async function finalizeInvoices(round){
   if(notReady > 0 && !confirm(`아직 ${notReady}건이 계산서를 제출하지 않았습니다. 그래도 완료 처리할까요?`)) return;
   const { error } = await sb.from('rounds').update({ status:'INVOICED' }).eq('id', round.id);
   if(error){ alert('처리 실패: '+error.message); return; }
+
+  // ⑥ 관리자에게 바우처 생성 준비 완료 알림
+  try{
+    const { data: rd } = await sb.from('rounds')
+      .select('id, period_label, settlement_types(name)').eq('id', round.id).single();
+    if(rd) await notifyReadyForVoucher(rd, rd.settlement_types);
+  } catch(e){ console.warn('[알림] 바우처 준비 알림 실패', e); }
+
   await renderRoundDetail();
 }
 
@@ -1610,6 +2096,7 @@ async function openRound(round, type){
   if(insErr){ alert('청구 항목 생성 실패: ' + insErr.message); return; }
   const { error: updErr } = await sb.from('rounds').update({ status:'OPEN' }).eq('id', round.id);
   if(updErr){ alert('회차 개설 실패: ' + updErr.message); return; }
+  await notifyRoundOpened(round, type, targetRetailerIds);   // ① 청구 요청 메일
   await renderRoundDetail();
 }
 
@@ -1623,13 +2110,130 @@ async function downloadFile(path){
    리테일러 화면 (Phase 2) — 회차 단위로 그룹핑, 엑셀 1건 업로드 시
    지점별 라인을 자동 인식해 각 청구 항목에 분배한다.
    ================================================================ */
+/* ---------- 리테일러 화면: AR 청구 확인 / 이의제기 ---------- */
+async function renderARRetailerCard(listEl, round, items){
+  const c = items[0]; // AR은 법인 단위 1건
+  const { data: dispute } = await sb.from('disputes')
+    .select('*').eq('round_id', round.id).eq('retailer_id', c.retailer_id).maybeSingle();
+
+  const canAct = round.status === 'PUBLISHED'
+    && (!round.dispute_due_at || new Date(round.dispute_due_at) > new Date());
+  const alreadyConfirmed = !!c.confirmed_at;
+  const hasRaised = dispute && dispute.status === 'RAISED';
+
+  const card = document.createElement('div');
+  card.className = 'claim-card';
+
+  let statusBadge;
+  if(hasRaised) statusBadge = '<span class="badge badge-warn">이의제기 검토중</span>';
+  else if(dispute?.status === 'APPROVED') statusBadge = '<span class="badge badge-ap">이의 승인됨</span>';
+  else if(dispute?.status === 'REJECTED') statusBadge = '<span class="badge badge-danger">이의 반려됨</span>';
+  else if(alreadyConfirmed) statusBadge = '<span class="badge badge-ap">확인완료</span>';
+  else statusBadge = '<span class="badge badge-off">미확인</span>';
+
+  card.innerHTML = `
+    <div class="claim-head">
+      <div>
+        <div class="claim-name">${round.settlement_types?.name||''} · ${round.period_label}</div>
+        <div class="claim-sub">
+          JLR Korea 청구 건 · ${round.dispute_due_at?`이의제기 마감 ${fmtDate(round.dispute_due_at)}`:'이의제기 마감 미설정'}
+          · <span class="badge ${round.status==='PUBLISHED'?'badge-ar':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>
+        </div>
+      </div>
+      ${statusBadge}
+    </div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>청구금액</th><th>근거자료</th></tr></thead>
+      <tbody><tr>
+        <td><b style="font-size:16px;color:var(--accent-ar);">${fmtWon(c.approved_amount)}</b></td>
+        <td>${c.evidence_path?`<span class="file-link" data-path="${c.evidence_path}">다운로드</span>`:'—'}</td>
+      </tr></tbody>
+    </table>
+    ${dispute?.decision_note?`<div class="hint" style="margin-top:8px;">관리자 회신: ${dispute.decision_note}</div>`:''}
+    ${hasRaised?`<div class="hint" style="margin-top:8px;">제출한 사유: ${dispute.reason||''}</div>`:''}
+  `;
+
+  if(canAct && !alreadyConfirmed && !hasRaised){
+    const actionWrap = document.createElement('div');
+    actionWrap.style.marginTop = '12px';
+    actionWrap.innerHTML = `
+      <div class="action-row" style="margin-top:0;">
+        <button class="btn btn-sm ar-confirm-btn">청구금액 확인</button>
+        <button class="btn btn-ghost btn-sm ar-dispute-toggle">이의제기</button>
+      </div>
+      <div class="ar-dispute-form" style="display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--border-soft);">
+        <div class="row2">
+          <div class="field"><label>요청 금액</label><input type="text" inputmode="numeric" class="row-amt-input ar-req-amt" style="width:100%;" placeholder="정정 요청 금액"></div>
+          <div class="field"><label>근거 파일</label><input type="file" class="ar-req-file"></div>
+        </div>
+        <div class="field"><label>사유 (필수)</label><input type="text" class="ar-req-reason" placeholder="예: 해당 건 중 3건은 당사 청구 대상이 아님"></div>
+        <button class="btn btn-sm ar-dispute-submit">이의제기 제출</button>
+      </div>`;
+    card.appendChild(actionWrap);
+
+    actionWrap.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
+    actionWrap.querySelector('.ar-dispute-toggle').addEventListener('click', () => {
+      const f = actionWrap.querySelector('.ar-dispute-form');
+      f.style.display = f.style.display === 'none' ? 'block' : 'none';
+    });
+    actionWrap.querySelector('.ar-confirm-btn').addEventListener('click', async () => {
+      if(!confirm(`청구금액 ${fmtWon(c.approved_amount)}을(를) 확인 처리할까요? 확인 후에는 이의제기가 불가합니다.`)) return;
+      const { error } = await sb.from('claims').update({ confirmed_at: new Date().toISOString() }).eq('id', c.id);
+      if(error){ alert('처리 실패: ' + error.message); return; }
+      await loadRetailerClaims();
+    });
+    actionWrap.querySelector('.ar-dispute-submit').addEventListener('click', () => submitDispute(actionWrap, round, c));
+  }
+
+  listEl.appendChild(card);
+  card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+}
+
+async function submitDispute(wrap, round, claim){
+  const reason = wrap.querySelector('.ar-req-reason').value.trim();
+  if(!reason){ alert('이의제기 사유를 입력해주세요.'); return; }
+  const requested = readAmountInput(wrap.querySelector('.ar-req-amt'));
+  const file = wrap.querySelector('.ar-req-file').files[0];
+
+  let evidencePath = null;
+  if(file){
+    const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    evidencePath = `${claim.retailer_id}/${round.id}/DISPUTE-${Date.now()}-${safeName}`;
+    const { error: upErr } = await sb.storage.from('settlements').upload(evidencePath, file, { upsert:true });
+    if(upErr){ alert('근거 파일 업로드 실패: ' + upErr.message); return; }
+  }
+
+  const { error } = await sb.from('disputes').insert({
+    round_id: round.id, retailer_id: claim.retailer_id, status:'RAISED',
+    reason, requested_amount: requested, evidence_path: evidencePath
+  });
+  if(error){ alert('이의제기 실패: ' + error.message); return; }
+
+  // 관리자 알림
+  try{
+    const emails = await getAdminEmails();
+    const html = emailShell('이의제기 접수', `
+      <table style="${EMAIL_STYLE}border-collapse:collapse;">
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">회차</td><td><b>${round.period_label}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">리테일러</td><td><b>${myRetailer?.code||''}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">기존 청구금액</td><td>${fmtWon(claim.approved_amount)}</td></tr>
+        ${requested!=null?`<tr><td style="padding:4px 12px 4px 0;color:#666;">요청금액</td><td><b>${fmtWon(requested)}</b></td></tr>`:''}
+        <tr><td style="padding:4px 12px 4px 0;color:#666;">사유</td><td>${reason}</td></tr>
+      </table>
+      <p style="margin-top:16px;">포털에서 승인/반려 처리를 진행해주세요.</p>`);
+    await sendEmail(emails, `[JLRK 정산] ${round.period_label} ${myRetailer?.code||''} 이의제기 접수`, html);
+  } catch(e){ console.warn('[알림] 이의제기 알림 실패', e); }
+
+  await loadRetailerClaims();
+}
+
 async function loadRetailerClaims(){
   const listEl = document.getElementById('retailerList');
   const emptyEl = document.getElementById('retailerEmpty');
   listEl.innerHTML = '';
 
   const { data: claims, error } = await sb.from('claims')
-    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, invoice_issue_date, settlement_types(name, direction, claim_unit)), workshops(name, code, biz_no)')
+    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, invoice_issue_date, dispute_due_at, settlement_types(name, direction, claim_unit)), workshops(name, code, biz_no)')
     .order('created_at', { ascending:true });
 
   if(error){ console.error(error); return; }
@@ -1646,6 +2250,13 @@ async function loadRetailerClaims(){
 
   for(const items of groups.values()){
     const round = items[0].rounds;
+
+    // AR(JLRK가 청구)은 별도 카드로 렌더링
+    if(round.settlement_types?.direction === 'AR'){
+      await renderARRetailerCard(listEl, round, items);
+      continue;
+    }
+
     const withinDeadline = round.status === 'OPEN' && (!round.claim_due_at || new Date(round.claim_due_at) > new Date());
     const hasRejected = items.some(c => c.status === 'REJECTED');
     const showUploadArea = withinDeadline || hasRejected;
@@ -1784,6 +2395,7 @@ async function loadRetailerClaims(){
         if(filePath) payload.file_path = filePath;
         const { error } = await sb.from('claims').update(payload).eq('id', btn.dataset.claimId);
         if(error){ alert('재청구 실패: ' + error.message); return; }
+        await notifyOnRetailerSubmit(round.id);   // ② 재청구도 관리자에게 알림
         await loadRetailerClaims();
       });
     });
@@ -1914,6 +2526,10 @@ async function submitInvoice(round, supplyAmount, rowEl){
     ({ error } = await sb.from('invoices').insert(payload));
   }
   if(error){ alert('제출 실패: ' + error.message); return; }
+
+  // ⑤ 관리자에게 세금계산서 제출 알림
+  await notifyInvoiceSubmitted(round, myRetailer?.code || '', supplyAmount, vat);
+
   await loadRetailerClaims();
 }
 
@@ -1943,7 +2559,26 @@ async function submitGroup(card, items, file){
     const { error } = await sb.from('claims').update(payload).eq('id', u.claimId);
     if(error){ alert('제출 실패 (일부 항목): ' + error.message); }
   }
+
+  // ② 관리자 알림 — 전원 제출 완료 여부를 DB에서 다시 세어 판정
+  await notifyOnRetailerSubmit(items[0].round_id);
+
   await loadRetailerClaims();
+}
+
+// 리테일러 제출 직후, 해당 회차의 전체 진행률을 세어 관리자에게 알림
+async function notifyOnRetailerSubmit(roundId){
+  try{
+    const { data: round } = await sb.from('rounds')
+      .select('id, period_label, settlement_types(name)').eq('id', roundId).single();
+    if(!round) return;
+    const { count: total } = await sb.from('claims')
+      .select('id', { count:'exact', head:true }).eq('round_id', roundId);
+    const { count: submitted } = await sb.from('claims')
+      .select('id', { count:'exact', head:true }).eq('round_id', roundId).in('status', ['SUBMITTED','APPROVED']);
+    await notifyClaimSubmitted(round, round.settlement_types,
+      myRetailer?.code || '', submitted||0, total||0);
+  } catch(e){ console.warn('[알림] 제출 알림 실패', e); }
 }
 
 checkSession();
