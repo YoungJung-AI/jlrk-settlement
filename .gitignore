@@ -2,3 +2,6 @@
 supabase/.temp/
 supabase/.branches/
 .env
+
+# Claude Code 개인 설정 (권한 허용 목록 등)
+.claude/settings.local.json
