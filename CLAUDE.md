@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # JLRK 리테일러 정산 포털
 
 JLR Korea가 8개 리테일러(21개 지점)와 주고받는 정산·청구 업무를 대체하는 웹 포털.
@@ -22,6 +26,42 @@ JLR Korea가 8개 리테일러(21개 지점)와 주고받는 정산·청구 업�
 /migrations/diagnostics/    ← 스키마 상태 점검용 진단 쿼리
 /supabase/functions/        ← Edge Functions (send-email, manage-user)
 ```
+
+## 명령어 / 로컬 개발
+
+빌드·테스트 러너·패키지 매니저 없음. `npm` 스크립트도 없다.
+
+- **로컬 실행**: 정적 서버로 `index.html`을 열면 끝. `python3 -m http.server 8000` 후
+  `http://localhost:8000`. `file://`로 직접 열면 Supabase 인증 리다이렉트가 깨질 수 있으니 서버로 띄울 것.
+  별도 개발용 Supabase 프로젝트는 없고 `index.html:723` 상수(`SUPABASE_URL`/`SUPABASE_ANON_KEY`)가
+  프로덕션을 가리킨다 — 로컬에서 로그인하면 실데이터에 붙는다는 점 유의.
+- **배포**: `main`에 push하면 GitHub Pages가 `index.html`을 그대로 서빙. 파이프라인 없음.
+- **Edge Function 배포**: `supabase functions deploy send-email` / `supabase functions deploy manage-user`
+  (Supabase CLI 필요, `supabase link`로 프로젝트 연결 후). 시크릿은
+  `supabase secrets set GMAIL_USER=... GMAIL_APP_PASSWORD=...` / `... SERVICE_ROLE_KEY=...`.
+  로컬 테스트는 `supabase functions serve <name> --env-file .env`.
+- **SQL 실행**: `migrations/`는 Supabase SQL Editor에 순서대로 붙여넣어 실행하는 방식(자동 러너 없음).
+  스키마 상태 점검은 `migrations/diagnostics/check_migrations_status.sql`를 SQL Editor에서 재실행.
+- **바우처 xlsx 검증**: 생성된 파일은 LibreOffice `recalc.py`로 열어 재계산이 깨지지 않는지 확인
+  (아래 "겪었던 사고" 1번). 자동 테스트 없으므로 수동 검증이 유일한 안전장치.
+
+## index.html 내부 구조 (단일 파일 SPA)
+
+- **레이아웃**: `<head>`에 CDN 스크립트 4개(`index.html:718~721`) → 인라인 `<style>`(다크 테마 커스텀 프로퍼티)
+  → `<body>`에 로그인 화면 + 비밀번호변경 화면 + `<main>` 안에 `<section id="view-*">` 8개
+  (`dashboard`/`accounts`/`audit`/`types`/`retailers`/`rounds`/`roundDetail`/`retailer`) → 인라인 `<script>`.
+- **라우팅**: 해시 라우터 없음. `switchView(name)`(`index.html:1263`)이 모든 `<section>`을 `display:none`으로
+  깔고 `view-<name>` 하나만 켠 뒤, 이름에 맞는 `loadXxx()`를 호출한다. 네비 클릭 → `switchView`.
+- **세션/진입**: `checkSession()` → `enterApp(session)`(`index.html:1171`)에서 `profiles` 행을 읽어
+  전역 `myProfile`에 저장하고 `role`로 분기 — `ADMIN`이면 `#adminNav` 표시 + `switchView('dashboard')`,
+  `RETAILER`면 `retailer-mode` 클래스 + `loadMyRetailerContext()` + `switchView('retailer')`.
+  `must_change_password`면 비밀번호 변경 화면으로 강제, `is_active===false`면 로그아웃.
+- **전역 상태**(`index.html:726~735`): `sb`(Supabase 클라이언트), `myProfile`, `myRetailer`,
+  `myWorkshops`, `selectedRetailerIds`, `currentRoundId`. 프레임워크 없이 이 전역들 + DOM이 상태의 전부.
+- **권한**: 프론트 분기는 UX일 뿐 실제 격리는 전부 Postgres RLS. 관리자 전용 서버 작업(계정 생성 등)은
+  `sb.functions.invoke('manage-user', ...)`가 Edge Function에서 `role='ADMIN'`을 재검증한다.
+- **AP vs AR 회차 상세**: `renderRoundDetail()`(AP) / `renderARRoundDetail()`(AR)로 갈리고,
+  `amount_mode`에 따라 다시 `renderSystemSourceSection`(SYSTEM), 업로드/수동 입력 UI 등으로 분기.
 
 ## 도메인 핵심 개념
 
