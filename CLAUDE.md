@@ -113,22 +113,45 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
 
 ## 미완료 / 다음에 할 일
 
-- [ ] **Edge Function 미배포 2건** — 코드는 `/supabase/functions/`에 있음, 아직 Supabase에 deploy 안 함
-  - `send-email`: Gmail SMTP 발송 (`GMAIL_USER`, `GMAIL_APP_PASSWORD` 시크릿 필요)
-  - `manage-user`: 관리자의 계정 생성/비밀번호 재설정 (`SERVICE_ROLE_KEY` 시크릿 필요)
-- [ ] 리테일러 실제 이메일 주소 미입력 (전원 `placeholder@example.com` — 메일 발송 자동 스킵됨)
-- [ ] **Engine Oil Package 클레임 기반 정산 — 설계는 끝났고 코드 구현 진행 중.**
-  마지막 작업 지점: `classifySourceRows` / `settled_records` 관련 로직을 막 붙이던 중이었음.
-  요구사항: 리테일러가 시스템 안에서 "클레임 전송" 버튼을 누른 원본(누적 전체)을 관리자가 업로드하면,
-  `클레임상태='전송' AND dedup_hash가 settled_records에 없음` 조건으로 이번 회차 대상만 자동 추출.
-  월 단위로 끊지 않고 "미정산 잔량" 기준으로 지연 건까지 자동 포함되게 설계함.
-  이 유형은 바우처가 **한 원본에서 3개**(사용반환금/Retailer Support/Sales Incentive) 나오는데,
-  각각 배분 비율과 GL 라인 구성이 다름 — 상세는 이전 대화 기록 참고 필요.
-- [ ] One DMS License 같은 `amount_mode='UNIT'`(수량×단가) 유형의 입력 UI가 아직 없음.
-  DB 필드(`claims.quantity`, `settlement_types.unit_price`)만 있고 화면 미구현 — 지금은 관리자가
-  수동 계산 후 금액만 입력하는 임시 방편.
-- [ ] AR 검증 규칙 엔진(사용자가 발견한 오류 패턴을 자연어/UI로 등록해 자동 검증) — 설계 논의만 하고
-  구현 전. Anthropic API 키 필요 여부 포함해 사용자와 재확인 필요.
+> 프로젝트 전체 대화 기록(기획~Phase 7)은 `docs/history.md`에 있음. 설계 배경·수치가 필요하면 거기 참고.
+
+- [x] **Edge Function 배포 완료** (2026-08-30, `npx supabase` 사용)
+  - `send-email` ACTIVE v1 — `GMAIL_USER`/`GMAIL_APP_PASSWORD` 시크릿 이미 설정돼 있음
+  - `manage-user` ACTIVE v2 — `SERVICE_ROLE_KEY` 없으면 자동 주입되는 `SUPABASE_SERVICE_ROLE_KEY` 사용하도록 수정함
+  - 프로젝트 ref: `yomuvsquaewmfxhfcgao`, `supabase/.temp/`는 `.gitignore` 처리됨
+- [ ] 리테일러 실제 이메일 주소 미입력 (전원 `placeholder@example.com` — 메일 발송 자동 스킵됨).
+  `update retailers set email='...' where code='AJ';` 식으로 반영. 8개사 실제 주소 필요.
+- [ ] **Engine Oil Package 클레임 기반 정산 (`amount_mode='SYSTEM'`, 방향은 AP=지급) — 구현 진행 중.**
+  현재까지 된 것: `classifySourceRows`(index.html) + `settled_records`(migration 018) + `renderSystemSourceSection`
+  + 회차 확정 시 `settled_records` 기록 + 정산유형 설정폼에 dedup_keys·상태필터 필드. 4분류
+  (정산대상 / 기정산제외 / 상태제외 / 파일내중복)까지 동작.
+  **아직 안 된 것 3가지:**
+  1. **바우처 3종 분기 생성** — 현재 코드는 `voucher_lines[0]` 하나만 사용. 이 유형은 원본 1개(마스터 xlsx)에서
+     바우처가 3개 나옴. FY27 Q2 기준 실제 수치:
+     - **① 사용반환금**: 쿠폰(고객) = 총금액 × **80%**. GL `702030000`. VAT `V0:0%`. JG/LR 실적기준. GL 라인 2개.
+     - **② Retailer Support**: 쿠폰(KR) = 총금액 × **20%** = margin off + VME + Castrol.
+       GL 2개 = `700050800`(VME) + `1105020600`(Castrol). VAT `V0:0%`. 실적기준. GL 라인 **4개**(VME LR/JG + Castrol LR/JG).
+     - **③ Sales Incentive**: 최종판매수 × **10,000원**. GL `700050800`. VAT `V0:0%`. JG/LR **고정 90:10**. GL 라인 2개.
+     - 브랜드 판정: **차대번호 3번째 자리 = `L` → Land Rover, 아니면 Jaguar.**
+     - ⚠️ 사용자가 준 Retailer Support 원본에 JG/LR 코스트센터 라인이 뒤바뀐 회계 오류 있음(아래 "확인해야 할 것" 참고).
+  2. **리테일러 [정산 확정] 화면** — SYSTEM 유형은 리테일러가 입력 없이 관리자가 계산한 값 확인 후
+     "정산 확정" 버튼만 누르는 흐름(DRAFT: 관리자 원본 업로드·자동계산·검증 → PUBLISHED: 리테일러 확인 → CONFIRMED: 바우처 3종 생성).
+     현재 AR용 `renderARRoundDetail`과 유사하나 방향이 AP.
+  3. **금액 산출식 설정 UI** — 유형별로 80%/20%/×10,000 같은 식을 설정에 저장(작업하다 멈춘 지점).
+  - dedup_keys(Engine Oil): `["차대번호","쿠폰사용 참조번호","쿠폰번호"]` 3개 조합 — 참조번호 단독은 895건 중복이라 위험.
+    정규화 = 공백제거 + 대문자통일. 상태필터: `클레임상태 = 전송`인 건만, 미전송은 관리자만 확인(리테일러 통보 없음).
+  - "미정산 잔량" 기준: 월로 자르지 않고 `전송 AND dedup_hash ∉ settled_records` 조건 하나로 지연 건까지 자동 포함.
+  - 초기 적재: 과거 정산분 원본(같은 로우데이터 형식)을 정산유형 화면에서 업로드 → `settled_records`에 선등록. 범용 기능.
+- [ ] **`amount_mode='UNIT'`(수량×단가) 입력 UI 미구현** (예: One DMS License, 분기 1회, 단가 예 `109329.6667`).
+  DB 필드(`claims.quantity`, `settlement_types.unit_price`)만 있음. 지점별 수량 입력 → 단가 곱해 자동계산하는 화면 필요.
+  이 유형은 법인 대표지점 1곳에 금액 몰빵(`workshops`의 대표지점 플래그), VAT `A1:10%`, GL `605030101`, JG/LR 고정 10:90.
+  지금은 관리자가 수동 계산 후 금액만 입력하는 임시 방편.
+- [ ] **검증 규칙 엔진** — 사용자가 엑셀로 눈으로 하던 검증을 포털 안에서 자동 실행. 설계만 끝남(`docs/history.md` 3805~3976).
+  - 핵심 원칙: **AI는 규칙을 "만들 때만" 사용**, 실제 검증(라인 수천 건)은 결정론적 계산 로직으로 매번 실행.
+  - 규칙 JSON 타입: `FORMULA`(계산식 재검증), `RANGE`, `DUPLICATE`(dedup keys), `DATE_RANGE`(기간 이탈),
+    `REQUIRED`, `ENUM`, `SUM_MATCH`(raw↔요약 합계). `level`: `ERROR`(제출 차단) / `WARN`(경고만).
+  - 입력 방식은 **C안**: 기본은 규칙 빌더 UI(무료), 자연어→규칙 변환은 Anthropic API 키 있으면 활성/없으면 자동 숨김.
+    검증 엔진(규칙 실행부)을 먼저 만들고 입력 방식 2갈래를 그 위에 얹음. **API 키 발급 가능 여부 사용자 재확인 필요.**
 - [ ] GitHub Pages URL이 개인 계정(`youngjung-ai.github.io`)으로 보이는 문제 — Organization 이전 검토 중,
   사내 승인 필요해 보류 상태.
 
@@ -137,6 +160,15 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
 - AJ/EN/HS/WB 리테일러 그룹은 **지점별로 사업자번호가 다르다** (프랜차이즈 개별사업자 구조).
   세금계산서는 리테일러 단위 1건으로 확정했지만, 실제 회계 처리와 맞는지 사용자 확인 필요.
 - 여러 정산 원본에서 **JG/LR 코스트센터 라인이 뒤바뀐 실제 회계 오류**를 발견해 사용자에게 보고함
-  (Recall 10:90 고정배분 버그, Engine Oil Retailer Support JG/LR 라인 반전 등). 시스템 버그가 아니라
+  (Recall 10:90 고정배분 버그, Engine Oil AR/Retailer Support JG/LR 라인 반전 등). 시스템 버그가 아니라
   사용자의 기존 수작업 엑셀에 있던 문제이므로, 코드 수정 대상이 아니라 사용자가 실제 회계와
   크로스체크할 사안. 새로 정산 유형을 만들 때 원본 파일의 계산식을 그대로 믿지 말고 검증할 것.
+  - Engine Oil AR: JG `64,666,800`이 LR 라인에, LR `377,155,533`이 JG 라인에 (약 3억 반전).
+  - Retailer Support: JG 코스트센터에 LR 금액(VME `40,576,863` 등), LR에 JG 금액. Castrol 라인도 동일.
+  - 표지 검증식 `M54=IF(G53=$E$27,...)`이 VAT 세율코드 셀(`$E$27`)을 봄 — `$E$25`(Net)가 맞음. AP·AR 양쪽 템플릿 공통 버그.
+- **AR 거래처 코드 체계는 AP와 완전 별개.** AP=vendor code(`KRJD01048`), AR=customer code(`KR01074MIS`).
+  `workshops.customer_code`/`ar_biz_no` 컬럼은 있으나 값 미입력 → 리테일러 관리 화면에서 직접 채워야 AR 바우처 생성 가능.
+  같은 지점에 파일마다 다른 코드 발견(효성 센텀: DMS `KR01030MIS` vs Engine Oil `KR01170MIS`) — 어느 게 맞는지 확인 필요.
+- **AR 대상 범위가 8개사 마스터보다 넓음** — 브리티시·선진·C&D, CH CA 지점 등이 AR 원본에 포함. 포털 등록 여부 미정.
+- 세금계산서 발행일 등 회차 기간 밖 데이터가 원본에 섞여 들어오는 사례 있음(P&D 2Q 정산에 3월 건 `51,000`).
+  검증 규칙 `DATE_RANGE`로 자동 플래그 대상.
