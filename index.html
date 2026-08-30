@@ -3056,18 +3056,23 @@ async function renderARRoundDetail(round, type){
       const srcInput = document.getElementById('ar_source_file');
       if(srcInput) srcInput.addEventListener('change', () => parseARSource(srcInput, type, round));
 
+      const isUnit = type.amount_mode === 'UNIT';
+      const unitPrice = Number(type.unit_price) || 0;
+      const fmtPrice = unitPrice.toLocaleString('ko-KR', { maximumFractionDigits:4 });
       const card = document.createElement('div');
       card.className = 'info-card';
-      card.innerHTML = `<div class="section-label" style="margin-top:0;">청구금액 입력 (${total}개사)</div>`;
+      card.innerHTML = `<div class="section-label" style="margin-top:0;">청구금액 입력 (${total}개사)</div>
+        ${isUnit ? `<div class="hint" style="margin-top:0;">수량을 입력하면 <b>수량 × 단가(${fmtPrice})</b> 로 청구금액이 자동 계산됩니다 (원 단위 반올림).${unitPrice ? '' : ' <span style="color:var(--accent-ar);">⚠️ 유형 설정에 단가가 없습니다.</span>'}</div>` : ''}`;
       const tbl = document.createElement('table');
-      tbl.innerHTML = `<thead><tr><th>리테일러</th><th>청구금액</th><th>근거자료</th><th></th></tr></thead><tbody></tbody>`;
+      tbl.innerHTML = `<thead><tr><th>리테일러</th>${isUnit ? '<th>수량</th><th>단가</th>' : ''}<th>청구금액</th><th>근거자료</th><th></th></tr></thead><tbody></tbody>`;
       const tb = tbl.querySelector('tbody');
       (claims||[]).forEach(c => {
         const tr = document.createElement('tr');
         tr.dataset.claimId = c.id;
         tr.innerHTML = `
           <td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
-          <td><input type="text" inputmode="numeric" class="row-amt-input ar-amt-input" style="width:130px;" value="${c.approved_amount!=null?Number(c.approved_amount).toLocaleString('ko-KR'):''}"></td>
+          ${isUnit ? `<td><input type="text" inputmode="numeric" class="ar-qty-input" style="width:90px;" value="${c.quantity!=null?Number(c.quantity).toLocaleString('ko-KR'):''}"></td><td class="muted">${fmtPrice}</td>` : ''}
+          <td><input type="text" inputmode="numeric" class="row-amt-input ar-amt-input" style="width:130px;" value="${c.approved_amount!=null?Number(c.approved_amount).toLocaleString('ko-KR'):''}" ${isUnit ? 'readonly' : ''}></td>
           <td>${c.evidence_path
               ? `<span class="file-link" data-path="${c.evidence_path}">첨부됨</span> <input type="file" class="ar-file-input" style="font-size:11px;width:120px;">`
               : `<input type="file" class="ar-file-input" style="font-size:11px;width:150px;">`}</td>
@@ -3078,6 +3083,16 @@ async function renderARRoundDetail(round, type){
       actions.parentElement.appendChild(card);
       card.querySelectorAll('.row-amt-input').forEach(formatAmountInput);
       card.querySelectorAll('.file-link').forEach(el => el.addEventListener('click', () => downloadFile(el.dataset.path)));
+      if(isUnit){
+        card.querySelectorAll('.ar-qty-input').forEach(q => {
+          formatAmountInput(q);
+          q.addEventListener('input', () => {
+            const qty = readAmountInput(q) || 0;
+            const amtEl = q.closest('tr').querySelector('.ar-amt-input');
+            amtEl.value = qty ? Math.round(qty * unitPrice).toLocaleString('ko-KR') : '';
+          });
+        });
+      }
       card.querySelectorAll('.ar-save-btn').forEach(btn => {
         btn.addEventListener('click', () => saveARClaim(btn.closest('tr'), round));
       });
@@ -3301,11 +3316,13 @@ async function createARTargets(round, type){  let targets = type.target_retailer
 // AR: 리테일러별 청구금액·근거 저장
 async function saveARClaim(rowEl, round){
   const claimId = rowEl.dataset.claimId;
+  const qtyEl = rowEl.querySelector('.ar-qty-input');
   const amount = readAmountInput(rowEl.querySelector('.ar-amt-input'));
-  if(amount == null){ alert('청구금액을 입력해주세요.'); return; }
+  if(amount == null){ alert(qtyEl ? '수량을 입력해주세요.' : '청구금액을 입력해주세요.'); return; }
   const file = rowEl.querySelector('.ar-file-input')?.files[0];
 
   const payload = { approved_amount: amount };
+  if(qtyEl){ payload.quantity = readAmountInput(qtyEl); }
   if(file){
     const { data: c } = await sb.from('claims').select('retailer_id').eq('id', claimId).single();
     const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
