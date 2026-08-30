@@ -20,9 +20,10 @@ Deno.serve(async (req) => {
 
   try {
     const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
-    const SERVICE_KEY = Deno.env.get('SERVICE_ROLE_KEY');
+    // 직접 설정한 SERVICE_ROLE_KEY 가 없으면 Supabase 가 자동 주입하는 SUPABASE_SERVICE_ROLE_KEY 사용
+    const SERVICE_KEY = Deno.env.get('SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
     const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
-    if (!SERVICE_KEY) return json({ error: 'SERVICE_ROLE_KEY 시크릿이 설정되어 있지 않습니다.' }, 500);
+    if (!SERVICE_KEY) return json({ error: 'service_role 키를 찾을 수 없습니다.' }, 500);
 
     // ---- 1) 호출자가 정말 관리자인지 서버에서 재검증 ----
     const authHeader = req.headers.get('Authorization') || '';
