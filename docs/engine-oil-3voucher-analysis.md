@@ -69,6 +69,41 @@
 - 산출식(history): 지점별 금액 = **최종 판매수 × 10,000원** (판매 count − 환불 count). ※ master `Sales Incentive` 시트에서 정확한 식 재확인 필요.
 - M54 = `=IF(G53=$E$27,...)` (VAT코드 참조 버그).
 
+## 확정된 계산식 (master `Engine Oil Package Claim list` 행4~5 + 사용자 확인 2026-08-31)
+
+원본 `CouponClaim 현황.xlsx` 컬럼: A번호 B딜러명 C지점 D쿠폰번호 E클레임상태 F쿠폰사용참조번호
+G사용일자 H클레임전송일자 I고객명 J차량번호 **K차대번호** L부품금액 M공임금액 **N총금액**.
+
+CouponClaim 라인별 (`클레임상태='전송'` AND dedup_hash ∉ settled_records):
+```
+brand   = (차대번호[3번째 글자] == 'L') ? 'LandRover' : 'Jaguar'
+total   = N(총금액)                       # = 부품금액 + 공임금액
+customer= total * 0.8                      # 쿠폰(고객) → 사용반환금
+castrol = 21000                            # 상수, 쿠폰 1건당
+vme     = total * 0.2 - 21000              # (= margin off + 10000). 쿠폰(KR) 20% 중 Castrol 제외분
+```
+지점 × 브랜드 집계:
+```
+count    = 라인 수
+customer = Σ(total) * 0.8
+castrol  = 21000 * count
+vme      = Σ(total) * 0.2 - 21000 * count
+```
+→ 검증(master N열): `customer + (vme + castrol) == total` (즉 80% + 20%).
+
+### 바우처별 값
+- **① 사용반환금**: 지점별 JG = Jaguar.customer, LR = LandRover.customer. 표지 라인 2개(GL 702030000).
+- **② Retailer Support**: VME 시트 지점별 JG=Jaguar.vme / LR=LandRover.vme;
+  Castrol 시트 지점별 JG=Jaguar.castrol / LR=LandRover.castrol.
+  표지 라인 4개 — **라벨·금액·표식을 올바르게 맞춰 생성**(원본 반전 버그 시스템에서 교정, 사용자 확인함):
+  GL 700050800 JG(KR02JSU300)=ΣJG.vme / GL 700050800 LR(KR02LSU300)=ΣLR.vme /
+  GL 1105020600 JG=ΣJG.castrol / GL 1105020600 LR=ΣLR.castrol.
+- **③ Sales Incentive**: 원본 `쿠폰북정산내역` 컬럼 A기준월 B리테일러 C지점명 **D지점코드** **E유형**(판매/환불/반품)
+  F차대번호 ... M가격(VAT) P요청여부 Q요청일.
+  지점별 `최종판매수 = 판매건수 − 환불건수 (+ 반품건수)` × **10,000원**.
+  표지 라인 2개(GL 700050800): LR = ROUND(총액×90%), JG = 총액 − LR (고정 90:10).
+  ※ 브리티시(BA) 등 8개사 밖 딜러는 앞으로 없음(사용자 확인) → 21개 지점만 대상.
+
 ## 확인 필요 (구현 착수 전)
 1. **쿠폰(고객)/쿠폰(KR) 분리**: master를 보면 `Claim list` E열(쿠폰 고객)·F열(쿠폰 KR)이 원본에 이미 분리돼 들어옴.
    history의 "총금액 × 80% / × 20%"는 근사 설명이고, 실제로는 원본 컬럼을 그대로 합산하는 것으로 보임 → 맞나?
