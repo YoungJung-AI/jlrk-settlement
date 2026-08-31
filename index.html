@@ -1885,9 +1885,520 @@ function renderEngineOilPreview(coupon, sales){
       <div class="hint">
         고객(${won(tCust)}) + VME(${won(tVme)}) + Castrol(${won(tCast)}) = <b>${won(tCust+tVme+tCast)}</b>
         &nbsp;→ 쿠폰 고객 80% + 쿠폰 KR 20% 구조.<br>
-        ※ 미리보기 단계입니다. 리테일러 정산 확정 화면과 바우처 생성은 다음 단계에서 붙습니다.
+        ※ 아래 [리테일러에 정산내역 공지]를 누르면 이 내역이 각 리테일러에게 전달됩니다.
       </div>
     </div>`;
+}
+
+/* ================================================================
+   Engine Oil 3V — 회차 상태머신 (DRAFT → PUBLISHED → CONFIRMED → VOUCHERED)
+   AP 방향이지만 리테일러 입력이 없어 흐름은 AR과 유사(공지 → 확인)
+   ================================================================ */
+
+// coupon/sales 파싱 결과 + workshops 마스터 → 리테일러별 확정 내역
+function eo3vBuildBreakdown(coupon, sales, allWs){
+  const wsByCode = new Map();
+  (allWs||[]).forEach(w => {
+    wsByCode.set(normalizeLabel(w.code), w);
+  });
+  const findWs = (code) => wsByCode.get(normalizeLabel(code));
+
+  const byRt = new Map();   // retailer_id → { code, name, workshops:[], customer,vme,castrol,incentive }
+  const settle = [];
+  const unmatched = [];
+  const blankT = () => ({ customer:0, vme:0, castrol:0, incentive:0, total:0 });
+
+  const ensureRt = (w) => {
+    let rt = byRt.get(w.retailer_id);
+    if(!rt){
+      rt = { retailer_id: w.retailer_id, code: w.retailers?.code || '', name: w.retailers?.name || '',
+             workshops: [], ...blankT() };
+      byRt.set(w.retailer_id, rt);
+    }
+    return rt;
+  };
+
+  // 쿠폰 클레임 (사용반환금 + Retailer Support)
+  coupon.byWs.forEach((g, code) => {
+    const w = findWs(code);
+    if(!w){ unmatched.push(code); return; }
+    const rt = ensureRt(w);
+    const wsRow = {
+      code, workshop_id: w.id, vendor_code: w.vendor_code || '',
+      jg: { count:g.jg.n, customer:g.jg.customer, vme:g.jg.vme, castrol:g.jg.castrol },
+      lr: { count:g.lr.n, customer:g.lr.customer, vme:g.lr.vme, castrol:g.lr.castrol },
+      incentive: { sale:0, refund:0, count:0, amount:0 }
+    };
+    rt.workshops.push(wsRow);
+    rt.customer += g.jg.customer + g.lr.customer;
+    rt.vme      += g.jg.vme + g.lr.vme;
+    rt.castrol  += g.jg.castrol + g.lr.castrol;
+  });
+
+  // 인센티브 병합
+  if(sales){
+    sales.byWs.forEach((g, code) => {
+      const w = findWs(code);
+      if(!w){ if(!unmatched.includes(code)) unmatched.push(code); return; }
+      const rt = ensureRt(w);
+      let wsRow = rt.workshops.find(x => x.code === code);
+      if(!wsRow){
+        wsRow = { code, workshop_id: w.id, vendor_code: w.vendor_code || '',
+          jg:{count:0,customer:0,vme:0,castrol:0}, lr:{count:0,customer:0,vme:0,castrol:0},
+          incentive:{ sale:0, refund:0, count:0, amount:0 } };
+        rt.workshops.push(wsRow);
+      }
+      const fin = g.sale - g.refund;
+      const amt = fin * EO3V.INCENTIVE_UNIT;
+      wsRow.incentive = { sale:g.sale, refund:g.refund, count:fin, amount:amt };
+      rt.incentive += amt;
+    });
+  }
+
+  // 지문 → settled_records
+  (coupon.targetHashes||[]).forEach(t => {
+    const w = findWs(t.code);
+    settle.push({ h: t.hash, ws_id: w?.id || null, rt_id: w?.retailer_id || null, amt: t.amount });
+  });
+
+  const retailers = [];
+  let grand = blankT(); let grandIncCount = 0;
+  byRt.forEach(rt => {
+    rt.total = rt.customer + rt.vme + rt.castrol + rt.incentive;
+    grand.customer += rt.customer; grand.vme += rt.vme;
+    grand.castrol += rt.castrol; grand.incentive += rt.incentive;
+    rt.workshops.forEach(x => grandIncCount += x.incentive.count);
+    retailers.push(rt);
+  });
+  grand.total = grand.customer + grand.vme + grand.castrol + grand.incentive;
+  grand.incentiveCount = grandIncCount;
+  retailers.sort((a,b) => a.code.localeCompare(b.code));
+  return { retailers, grand, settle, unmatched };
+}
+
+async function renderEngineOilRoundDetail(round, type){
+  document.getElementById('claimsTable').style.display = 'none';
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  document.getElementById('rd_status').innerHTML =
+    `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent = 'AP · 시스템 산출 (바우처 3종) · 리테일러 입력 없음';
+  document.getElementById('rd_due').textContent = round.invoice_issue_date
+    ? `세금계산서 발행일 ${round.invoice_issue_date}` : '발행일 미설정';
+
+  const { data: claims } = await sb.from('claims')
+    .select('*, retailers(code,name,biz_no)').eq('round_id', round.id).order('created_at');
+  const confirmed = (claims||[]).filter(c => c.confirmed_at).length;
+  const total = claims?.length || 0;
+  document.getElementById('rd_progress').textContent = total ? `확정 ${confirmed} / ${total}` : '공지 전';
+
+  const actions = document.getElementById('rd_actions');
+  ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
+    const el = document.getElementById(id); if(el) el.innerHTML = '';
+  });
+
+  if(round.status === 'DRAFT'){
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="row2" style="max-width:420px;">
+        <div class="field"><label>세금계산서 발행일 (바우처 Invoice Date)</label>
+          <input type="date" id="eoIssueDate" value="${round.invoice_issue_date || new Date().toISOString().slice(0,10)}"></div>
+      </div>
+      <button class="btn" id="eoPublishBtn" disabled>리테일러에 정산내역 공지</button>
+      <div class="hint" style="margin-top:6px;">원본 2개를 올려 미리보기가 나온 뒤 활성화됩니다.</div>`;
+    actions.appendChild(wrap);
+    document.getElementById('eoPublishBtn').addEventListener('click', () => publishEngineOilRound(round, type));
+    await renderEngineOilSection(round, type, claims);
+    // 미리보기 계산이 끝나면 공지 버튼 활성화
+    const obs = setInterval(() => {
+      const btn = document.getElementById('eoPublishBtn');
+      if(!btn){ clearInterval(obs); return; }
+      btn.disabled = !(window.__eo3v && window.__eo3v.round_id === round.id && window.__eo3v.coupon);
+    }, 800);
+    return;
+  }
+
+  // PUBLISHED 이후 — 리테일러 확정 현황
+  const s = round.source_summary || {};
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  const rows = (claims||[]).map(c => `
+    <tr><td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
+      <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}</td>
+    </tr>`).join('');
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">리테일러 확정 현황 (${confirmed}/${total})</div>
+    <table><thead><tr><th>리테일러</th><th style="text-align:right;">정산 합계</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint" style="margin-top:8px;">
+      3종 합계 — 사용반환금 ${fmtWon(s.grand?.customer)} · Retailer Support ${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))} · Sales Incentive ${fmtWon(s.grand?.incentive)}
+    </div>`;
+  document.getElementById('reviewSection').appendChild(card);
+
+  const vs = document.getElementById('voucherSection');
+  if(round.status === 'PUBLISHED'){
+    const allDone = total > 0 && confirmed === total;
+    const b = document.createElement('button');
+    b.className = 'btn'; b.textContent = allDone ? '전체 확정 완료 처리' : `전체 확정 완료 처리 (미확인 ${total-confirmed}곳 강제 포함)`;
+    b.addEventListener('click', () => finalizeEngineOilRound(round, type));
+    vs.appendChild(b);
+  } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
+    const b = document.createElement('button');
+    b.className = 'btn'; b.textContent = round.status === 'VOUCHERED' ? '바우처 3종 다시 생성' : '바우처 3종 생성 (ZIP)';
+    b.addEventListener('click', () => generateEngineOilVouchers(round, type));
+    vs.appendChild(b);
+    const re = document.createElement('button');
+    re.className = 'btn btn-ghost'; re.style.marginLeft = '8px'; re.textContent = '원본 다시 올리기 (DRAFT로)';
+    re.addEventListener('click', async () => {
+      if(!confirm('DRAFT로 되돌리면 이번 회차 기정산 기록이 삭제되고 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
+      await sb.from('settled_records').delete().eq('round_id', round.id);
+      await sb.from('claims').delete().eq('round_id', round.id);
+      await sb.from('rounds').update({ status:'DRAFT', source_summary:null }).eq('id', round.id);
+      await renderRoundDetail();
+    });
+    vs.appendChild(re);
+  }
+}
+
+async function publishEngineOilRound(round, type){
+  const eo = window.__eo3v;
+  if(!eo || !eo.coupon){ alert('원본 미리보기가 아직 없습니다.'); return; }
+  const issueDate = document.getElementById('eoIssueDate')?.value || new Date().toISOString().slice(0,10);
+  const btn = document.getElementById('eoPublishBtn');
+  btn.disabled = true; btn.textContent = '공지 처리 중...';
+  try{
+    const { data: allWs, error: wErr } = await sb.from('workshops')
+      .select('id, code, name, vendor_code, retailer_id, retailers(code,name)').eq('is_active', true);
+    if(wErr) throw wErr;
+    const bd = eo3vBuildBreakdown(eo.coupon, eo.sales, allWs);
+    if(!bd.retailers.length) throw new Error('매칭된 리테일러가 없습니다. 미매칭 지점: ' + bd.unmatched.join(', '));
+
+    // claims upsert (리테일러당 1건, workshop_id null)
+    for(const rt of bd.retailers){
+      const { data: existing } = await sb.from('claims')
+        .select('id').eq('round_id', round.id).eq('retailer_id', rt.retailer_id).is('workshop_id', null).maybeSingle();
+      const payload = {
+        round_id: round.id, retailer_id: rt.retailer_id, workshop_id: null,
+        status: 'SUBMITTED', approved_amount: Math.round(rt.total),
+        detail: rt, confirmed_at: null, submitted_at: new Date().toISOString()
+      };
+      const { error } = existing
+        ? await sb.from('claims').update(payload).eq('id', existing.id)
+        : await sb.from('claims').insert(payload);
+      if(error) throw error;
+    }
+
+    const summary = {
+      preset: 'ENGINE_OIL_3V', computed_at: new Date().toISOString(),
+      invoice_issue_date: issueDate,
+      grand: bd.grand, retailers: bd.retailers, settle: bd.settle,
+      counts: { target: eo.coupon.nTarget, excluded: eo.coupon.nExcluded, dup: eo.coupon.nDup }
+    };
+    const { error: rErr } = await sb.from('rounds')
+      .update({ status:'PUBLISHED', source_summary: summary, invoice_issue_date: issueDate }).eq('id', round.id);
+    if(rErr) throw rErr;
+    await logAudit('EO3V_PUBLISH','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, retailers: bd.retailers.length});
+    try{ await notifyEngineOilPublished(round, type, bd.retailers); }catch(e){ console.warn(e); }
+    await renderRoundDetail();
+  }catch(err){
+    console.error(err);
+    alert('공지 실패: ' + (err.message || err));
+    btn.disabled = false; btn.textContent = '리테일러에 정산내역 공지';
+  }
+}
+
+async function notifyEngineOilPublished(round, type, retailers){
+  const ids = retailers.map(r => r.retailer_id);
+  const { data: rts } = await sb.from('retailers').select('id, email, name').in('id', ids);
+  for(const rt of (rts||[])){
+    if(!rt.email || rt.email === 'placeholder@example.com') continue;
+    await sendEmail(rt.email, `[JLRK 정산] ${type.name} · ${round.period_label} 정산내역 확인 요청`,
+      `<p>${rt.name} 담당자님,</p><p>${type.name} (${round.period_label}) 정산내역이 공지되었습니다. 포털에서 내역을 확인하시고 [정산 확정] 버튼을 눌러주세요.</p>`);
+  }
+}
+
+async function finalizeEngineOilRound(round, type){
+  if(!confirm('전체 확정 처리하면 이번 회차 정산 건이 기정산 이력에 기록되어 다음 회차부터 자동 제외됩니다. 계속할까요?')) return;
+  const s = round.source_summary || {};
+  const settle = s.settle || [];
+  try{
+    // settled_records 기록 (중복은 무시)
+    const CH = 500;
+    for(let i=0; i<settle.length; i+=CH){
+      const chunk = settle.slice(i, i+CH).map(x => ({
+        type_id: type.id, dedup_hash: x.h, round_id: round.id,
+        retailer_id: x.rt_id, workshop_id: x.ws_id, amount: x.amt, source: 'ROUND'
+      }));
+      const { error } = await sb.from('settled_records').upsert(chunk, { onConflict:'type_id,dedup_hash' });
+      if(error) throw error;
+    }
+    const { error: rErr } = await sb.from('rounds').update({ status:'CONFIRMED' }).eq('id', round.id);
+    if(rErr) throw rErr;
+    await logAudit('EO3V_CONFIRM','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, settled: settle.length});
+    await renderRoundDetail();
+  }catch(err){
+    console.error(err); alert('확정 실패: ' + (err.message || err));
+  }
+}
+
+/* ---------- 리테일러 화면: Engine Oil 3종 정산내역 확인 카드 ---------- */
+async function renderEngineOilRetailerCard(listEl, round, items){
+  const c = items[0];
+  const d = c.detail || {};
+  const won = (n) => fmtWon(Math.round(n||0));
+  const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
+  const card = document.createElement('div');
+  card.className = 'claim-card';
+
+  const wsRows = (d.workshops||[]).map(w => {
+    const cust = (w.jg?.customer||0)+(w.lr?.customer||0);
+    const vme  = (w.jg?.vme||0)+(w.lr?.vme||0);
+    const cast = (w.jg?.castrol||0)+(w.lr?.castrol||0);
+    const inc  = w.incentive?.amount||0;
+    return `<tr><td>${w.code}</td><td style="text-align:right;">${won(cust)}</td>
+      <td style="text-align:right;">${won(vme+cast)}</td><td style="text-align:right;">${won(inc)}</td>
+      <td style="text-align:right;">${won(cust+vme+cast+inc)}</td></tr>`;
+  }).join('');
+
+  card.innerHTML = `
+    <div class="claim-head">
+      <div>
+        <div class="claim-name">${round.settlement_types?.name||''} · ${round.period_label}</div>
+        <div class="claim-sub">JLR Korea 산출 정산 · 확인만 하시면 됩니다
+          · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
+      </div>
+      ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
+    </div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>지점</th><th style="text-align:right;">사용반환금</th><th style="text-align:right;">Retailer Support</th><th style="text-align:right;">Sales Incentive</th><th style="text-align:right;">합계</th></tr></thead>
+      <tbody>${wsRows}</tbody>
+      <tfoot><tr style="font-weight:600;"><td>합계</td>
+        <td style="text-align:right;">${won(d.customer)}</td>
+        <td style="text-align:right;">${won((d.vme||0)+(d.castrol||0))}</td>
+        <td style="text-align:right;">${won(d.incentive)}</td>
+        <td style="text-align:right;color:var(--accent-ap);">${won(d.total)}</td></tr></tfoot>
+    </table>`;
+
+  if(canConfirm){
+    const w = document.createElement('div');
+    w.style.marginTop = '12px';
+    w.innerHTML = `<button class="btn btn-sm eo-confirm-btn">정산 확정</button>
+      <span class="hint" style="margin-left:8px;">확정하면 이 금액으로 세금계산서 발행 대상이 확정됩니다.</span>`;
+    w.querySelector('.eo-confirm-btn').addEventListener('click', async () => {
+      if(!confirm(`정산 합계 ${won(d.total)} 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
+      const { error } = await sb.from('claims').update({ confirmed_at: new Date().toISOString() }).eq('id', c.id);
+      if(error){ alert('처리 실패: ' + error.message); return; }
+      await loadRetailerClaims();
+    });
+    card.appendChild(w);
+  }
+  listEl.appendChild(card);
+}
+
+/* ================================================================
+   Engine Oil 3V — 바우처 3종 생성 (3단계)
+   저장된 템플릿 3개 + 확정 내역(source_summary) → xlsx 3개 + rawdata 통합 → ZIP
+   템플릿은 Storage: voucher-templates/eo3v-{saveback|support|incentive}.xlsx
+   ================================================================ */
+const EO3V_TPL = {
+  saveback:  'voucher-templates/eo3v-saveback.xlsx',
+  support:   'voucher-templates/eo3v-support.xlsx',
+  incentive: 'voucher-templates/eo3v-incentive.xlsx'
+};
+
+// 엑셀 날짜 직렬값 (1899-12-30 기준)
+function eo3vDateSerial(ymd){
+  const d = new Date(ymd + 'T00:00:00Z');
+  return Math.floor((d - new Date(Date.UTC(1899,11,30))) / 86400000);
+}
+
+// 템플릿 AP_input 시트에서 D열(vendor code) → 행번호 매핑
+function eo3vMapInputRows(wb, sheetName){
+  const ws = wb.Sheets[sheetName];
+  if(!ws) return {};
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const map = {};
+  for(let r = range.s.r; r <= range.e.r; r++){
+    const cell = ws['D' + (r+1)];
+    const v = cell ? String(cell.v || '').trim() : '';
+    if(/^KRJD\d+/.test(v)) map[v] = r + 1;
+  }
+  return map;
+}
+
+async function eo3vFillTemplate(tplBuf, { inputFills, coverDate }){
+  const zip = await JSZip.loadAsync(tplBuf);
+  let wbXml = await zip.file('xl/workbook.xml').async('string');
+  const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+  const relTargets = {};
+  let rm; const relRe = /<Relationship Id="([^"]+)"[^>]*Target="([^"]+)"[^>]*\/>/g;
+  while((rm = relRe.exec(relsXml))) relTargets[rm[1]] = rm[2];
+  const sheetEntries = [];
+  let sm; const sheetRe = /<sheet[^>]*name="([^"]*)"[^>]*r:id="([^"]*)"[^>]*\/>/g;
+  while((sm = sheetRe.exec(wbXml))) sheetEntries.push({ name: sm[1], rid: sm[2] });
+  const pathOf = (name) => {
+    const e = sheetEntries.find(x => x.name === name) || sheetEntries.find(x => x.name.trim() === String(name||'').trim());
+    if(!e) return null;
+    let t = relTargets[e.rid] || '';
+    return t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//,'');
+  };
+
+  // 입력 시트별 셀 채우기
+  for(const [sheetName, cells] of Object.entries(inputFills)){
+    const p = pathOf(sheetName);
+    if(!p || !zip.file(p)) continue;
+    let xml = await zip.file(p).async('string');
+    for(const [ref, val] of Object.entries(cells)){
+      xml = setCellInSheetXml(xml, ref, val, false).xml;
+    }
+    zip.file(p, xml);
+  }
+
+  // 표지 Invoice Date (E21)
+  const cp = pathOf('AP without PO');
+  if(cp && zip.file(cp) && coverDate != null){
+    let xml = await zip.file(cp).async('string');
+    xml = setCellInSheetXml(xml, 'E21', eo3vDateSerial(coverDate), false).xml;
+    zip.file(cp, xml);
+  }
+
+  // 열 때 강제 재계산 + calcChain 제거
+  if(/<calcPr[^>]*\/>/.test(wbXml)){
+    wbXml = wbXml.replace(/<calcPr([^>]*?)\/>/, (m,a) => `<calcPr${a.replace(/\s*fullCalcOnLoad="[^"]*"/,'')} fullCalcOnLoad="1"/>`);
+  } else {
+    wbXml = wbXml.replace('</workbook>', '<calcPr fullCalcOnLoad="1"/></workbook>');
+  }
+  zip.file('xl/workbook.xml', wbXml);
+  if(zip.file('xl/calcChain.xml')){
+    zip.remove('xl/calcChain.xml');
+    let ct = await zip.file('[Content_Types].xml').async('string');
+    ct = ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, '');
+    zip.file('[Content_Types].xml', ct);
+  }
+  return await zip.generateAsync({ type:'blob' });
+}
+
+async function generateEngineOilVouchers(round, type){
+  const vs = document.getElementById('voucherSection');
+  const s = round.source_summary;
+  if(!s || !s.retailers){ alert('확정 내역이 없습니다.'); return; }
+
+  // 템플릿 3개 확인
+  const missing = [];
+  const bufs = {};
+  for(const [k, path] of Object.entries(EO3V_TPL)){
+    const { data, error } = await sb.storage.from('settlements').download(path);
+    if(error || !data){ missing.push(k); } else { bufs[k] = await data.arrayBuffer(); }
+  }
+  if(missing.length){
+    let box = document.getElementById('eoTplBox');
+    if(!box){
+      box = document.createElement('div'); box.id = 'eoTplBox'; box.className = 'info-card';
+      vs.appendChild(box);
+    }
+    box.innerHTML = `<div class="section-label" style="margin-top:0;">바우처 템플릿 업로드 필요</div>
+      <div class="hint">아래 3개를 올리면 이후 회차에서도 재사용됩니다.</div>
+      ${Object.keys(EO3V_TPL).map(k => `<div class="field" style="max-width:520px;">
+        <label>${{saveback:'① 사용반환금',support:'② Retailer Support',incentive:'③ Sales Incentive'}[k]} 템플릿 ${missing.includes(k)?'':'✔'}</label>
+        <input type="file" accept=".xlsx" data-k="${k}"></div>`).join('')}`;
+    box.querySelectorAll('input[type=file]').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        const f = inp.files[0]; if(!f) return;
+        const { error } = await sb.storage.from('settlements').upload(EO3V_TPL[inp.dataset.k], f, { upsert:true });
+        if(error){ alert('업로드 실패: ' + error.message); return; }
+        inp.previousElementSibling; inp.disabled = true;
+        alert('업로드됨. 3개 모두 올린 뒤 다시 [바우처 3종 생성]을 눌러주세요.');
+      });
+    });
+    return;
+  }
+
+  const btnBusy = vs.querySelector('button');
+  if(btnBusy){ btnBusy.disabled = true; btnBusy.textContent = '생성 중...'; }
+  try{
+    const date = s.invoice_issue_date;
+    const rmap = {};   // vendor_code → { customer:{jg,lr}, vme:{jg,lr}, castrol:{jg,lr}, incentive:amount }
+    s.retailers.forEach(rt => rt.workshops.forEach(w => {
+      if(!w.vendor_code) return;
+      rmap[w.vendor_code] = {
+        customer: { jg: w.jg?.customer||0, lr: w.lr?.customer||0 },
+        vme:      { jg: w.jg?.vme||0,      lr: w.lr?.vme||0 },
+        castrol:  { jg: w.jg?.castrol||0,  lr: w.lr?.castrol||0 },
+        incentive: w.incentive?.amount || 0
+      };
+    }));
+
+    const out = new JSZip();
+    const R = (n) => Math.round(n);
+
+    // ① 사용반환금 — AP_input reqeust : M=JG customer, N=LR customer
+    {
+      const wb = XLSX.read(new Uint8Array(bufs.saveback), { type:'array' });
+      const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
+      const cells = {};
+      Object.entries(rmap).forEach(([vc, v]) => {
+        const r = rows[vc]; if(!r) return;
+        cells['M'+r] = R(v.customer.jg); cells['N'+r] = R(v.customer.lr);
+      });
+      out.file(`AP Voucher_${sanitizeFilename(round.period_label)}_사용반환금.xlsx`,
+        await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }));
+    }
+    // ② Retailer Support — (VME) 시트 M/N = VME jg/lr, (Castrol) 시트 M/N = Castrol jg/lr
+    {
+      const wb = XLSX.read(new Uint8Array(bufs.support), { type:'array' });
+      const rV = eo3vMapInputRows(wb, 'AP_input reqeust (VME)');
+      const rC = eo3vMapInputRows(wb, 'AP_input reqeust (Castrol)');
+      const cV = {}, cC = {};
+      Object.entries(rmap).forEach(([vc, v]) => {
+        if(rV[vc]){ cV['M'+rV[vc]] = R(v.vme.jg); cV['N'+rV[vc]] = R(v.vme.lr); }
+        if(rC[vc]){ cC['M'+rC[vc]] = R(v.castrol.jg); cC['N'+rC[vc]] = R(v.castrol.lr); }
+      });
+      out.file(`AP Voucher_${sanitizeFilename(round.period_label)}_Retailer Support.xlsx`,
+        await eo3vFillTemplate(bufs.support, {
+          inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC }, coverDate: date }));
+    }
+    // ③ Sales Incentive — AP_input reqeust : I = 지점 인센티브 금액 (M/N/I32은 수식)
+    {
+      const wb = XLSX.read(new Uint8Array(bufs.incentive), { type:'array' });
+      const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
+      const cells = {};
+      Object.entries(rmap).forEach(([vc, v]) => {
+        const r = rows[vc]; if(!r || !v.incentive) return;
+        cells['I'+r] = R(v.incentive);
+      });
+      out.file(`AP without PO_${sanitizeFilename(round.period_label)}_Sales Incentive.xlsx`,
+        await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }));
+    }
+
+    // rawdata 통합 근거 (지점별 3종 요약)
+    const rawRows = [];
+    s.retailers.forEach(rt => rt.workshops.forEach(w => rawRows.push({
+      리테일러: rt.code, 지점: w.code,
+      'JG 고객': R(w.jg?.customer||0), 'LR 고객': R(w.lr?.customer||0),
+      'JG VME': R(w.jg?.vme||0), 'LR VME': R(w.lr?.vme||0),
+      'JG Castrol': R(w.jg?.castrol||0), 'LR Castrol': R(w.lr?.castrol||0),
+      '인센티브 판매': w.incentive?.sale||0, '인센티브 환불': w.incentive?.refund||0,
+      '인센티브 금액': R(w.incentive?.amount||0)
+    })));
+    const rwb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(rwb, XLSX.utils.json_to_sheet(rawRows), '3종 요약');
+    out.file(`rawdata_통합_${sanitizeFilename(round.period_label)}.xlsx`,
+      new Blob([XLSX.write(rwb, { bookType:'xlsx', type:'array' })]));
+
+    const blob = await out.generateAsync({ type:'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `Engine Oil Package_바우처3종_${sanitizeFilename(round.period_label)}.zip`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+
+    if(round.status !== 'VOUCHERED'){
+      await sb.from('rounds').update({ status:'VOUCHERED' }).eq('id', round.id);
+    }
+    await logAudit('EO3V_VOUCHER','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
+    await renderRoundDetail();
+  }catch(err){
+    console.error(err); alert('바우처 생성 실패: ' + (err.message || err));
+    if(btnBusy){ btnBusy.disabled = false; btnBusy.textContent = '바우처 3종 생성 (ZIP)'; }
+  }
 }
 
 /* ---------- SYSTEM 유형: 원본 업로드 → 분류 결과 표시 ---------- */
@@ -2938,6 +3449,8 @@ async function renderRoundDetail(){
 
   // AR(JLRK → 리테일러 청구)은 흐름이 반대라 별도 화면으로 분기
   if(type.direction === 'AR'){ return renderARRoundDetail(round, type); }
+  // Engine Oil 3종 바우처 (AP · 시스템 산출 · 리테일러 입력 없음)
+  if(type.source_config?.preset === 'ENGINE_OIL_3V'){ return renderEngineOilRoundDetail(round, type); }
   document.getElementById('claimsTable').style.display = 'table'; // AR에서 돌아온 경우 복구
 
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -4785,7 +5298,7 @@ async function loadRetailerClaims(){
   listEl.innerHTML = '';
 
   const { data: claims, error } = await sb.from('claims')
-    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, invoice_issue_date, dispute_due_at, settlement_types(name, direction, claim_unit, form_template_path)), workshops(name, code, biz_no)')
+    .select('*, rounds(id, period_label, status, claim_due_at, invoice_due_at, invoice_issue_date, dispute_due_at, settlement_types(name, direction, claim_unit, form_template_path, source_config)), workshops(name, code, biz_no)')
     .order('created_at', { ascending:true });
 
   if(error){ console.error(error); return; }
@@ -4803,6 +5316,11 @@ async function loadRetailerClaims(){
   for(const items of groups.values()){
     const round = items[0].rounds;
 
+    // Engine Oil 3종 (AP · 시스템 산출) — 확인 전용 카드
+    if(round.settlement_types?.source_config?.preset === 'ENGINE_OIL_3V'){
+      await renderEngineOilRetailerCard(listEl, round, items);
+      continue;
+    }
     // AR(JLRK가 청구)은 별도 카드로 렌더링
     if(round.settlement_types?.direction === 'AR'){
       await renderARRetailerCard(listEl, round, items);
