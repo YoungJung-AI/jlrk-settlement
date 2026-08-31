@@ -152,8 +152,9 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
     `REQUIRED`, `ENUM`, `SUM_MATCH`(raw↔요약 합계). `level`: `ERROR`(제출 차단) / `WARN`(경고만).
   - 입력 방식은 **C안**: 기본은 규칙 빌더 UI(무료), 자연어→규칙 변환은 Anthropic API 키 있으면 활성/없으면 자동 숨김.
     검증 엔진(규칙 실행부)을 먼저 만들고 입력 방식 2갈래를 그 위에 얹음. **API 키 발급 가능 여부 사용자 재확인 필요.**
-- [ ] GitHub Pages URL이 개인 계정(`youngjung-ai.github.io`)으로 보이는 문제 — Organization 이전 검토 중,
-  사내 승인 필요해 보류 상태.
+- [x] GitHub Pages URL 이전 완료 (2026-08-31) — `jlrk-portal` Organization 생성 후 repo 이전 + `jlrk-portal.github.io` 로 이름 변경.
+  운영 주소: **https://jlrk-portal.github.io/** (기존 `youngjung-ai.github.io/jlrk-settlement/` 폐기).
+  git remote: `github.com/jlrk-portal/jlrk-portal.github.io`. Supabase Auth URL Configuration(Site URL / Redirect URLs)도 새 주소로 교체함.
 
 ## 확인해야 할 것 (아직 리스크로 남아있음)
 
