@@ -1646,8 +1646,255 @@ async function classifySourceRows(buf, type){
            totalRows: target.length + already.length + excluded.length + dupInFile.length + badKey.length };
 }
 
+/* ================================================================
+   Engine Oil Package — 시스템 산출 (원본 1개에서 바우처 3종)
+   유형 설정: amount_mode='SYSTEM' + source_config.preset='ENGINE_OIL_3V'
+   상세 계산식: docs/engine-oil-3voucher-analysis.md
+   ================================================================ */
+
+// 고정 상수 (회차마다 바뀌지 않음 — 사용자 확인 2026-08-31)
+const EO3V = {
+  CUSTOMER_RATE: 0.8,     // 총금액 × 80% → 사용반환금(쿠폰 고객분)
+  CASTROL_PER: 21000,     // 쿠폰 1건당 Castrol
+  INCENTIVE_UNIT: 10000,  // 최종판매 1건당 인센티브
+  // 원본 지점명 → DB workshops.code
+  WS_MAP: {
+    '전주 서비스센터':'WB-JJ', '대구 서비스센터':'EN-DG', '광주 서비스센터':'WB-GJ', '부산 서비스센터':'HY',
+    '부산센텀 서비스센터':'HS-BC', '성산 서비스센터':'AJ-SS', '성수 서비스센터':'CH-SS', '서초 서비스센터':'KCC-SC',
+    '일산 서비스센터':'KCC-IS', '대구2S 서비스센터':'EN-SDG', '대치 서비스센터':'CH-DC', '성남 서비스센터':'KCC-SN',
+    '수원 서비스센터':'CH-SW', '한남 서비스센터':'AJ-HN', '울산 서비스센터':'HS-US', '평촌 서비스센터':'BA-PC',
+    '원주 서비스센터':'KCC-WJ', '대전 서비스센터':'JL', '분당 서비스센터':'KCC-BD', '강동 서비스센터':'KCC-GD',
+    '인천남동 서비스센터':'AJ-ICND', '제주 서비스센터':'KCC-JJ', '천안 서비스센터':'CH-CA', '동대문 서비스센터':'BA-DDM'
+  }
+};
+
+// 원본 시트에서 헤더 행 탐색 (필수 컬럼명 포함 여부)
+function eo3vFindHeader(rows, required){
+  for(let i=0; i<Math.min(rows.length, 15); i++){
+    const map = {};
+    rows[i].forEach((h, idx) => { const t = String(h ?? '').trim(); if(t && map[t] === undefined) map[t] = idx; });
+    if(required.every(c => map[c] !== undefined)) return { headerRow: i, map };
+  }
+  return null;
+}
+function eo3vNum(v){ return Number(String(v ?? '').replace(/,/g,'')) || 0; }
+
+// ── CouponClaim 원본 → 지점×브랜드 집계 (전송 & 미정산만) ──
+async function parseEngineOilCoupon(buf, type){
+  const wb = XLSX.read(buf, { type:'array', cellDates:true });
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
+  const hdr = eo3vFindHeader(rows, ['차대번호','총금액','클레임상태','쿠폰번호']);
+  if(!hdr) throw new Error('쿠폰 클레임 원본에서 헤더(차대번호·총금액·클레임상태·쿠폰번호)를 찾지 못했습니다.');
+  const c = hdr.map;
+  const iVin = c['차대번호'], iTot = c['총금액'], iStatus = c['클레임상태'], iCpn = c['쿠폰번호'];
+  const iRef = c['쿠폰사용 참조번호'], iSite = c['지점'];
+
+  // 기정산 지문
+  const known = new Set();
+  for(let from=0;;from+=1000){
+    const { data, error } = await sb.from('settled_records')
+      .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
+    if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
+    (data||[]).forEach(r => known.add(r.dedup_hash));
+    if(!data || data.length < 1000) break;
+  }
+
+  const byWs = new Map();     // code → { jg:{n,customer,vme,castrol}, lr:{...} }
+  const blank = () => ({ n:0, customer:0, vme:0, castrol:0 });
+  const targetHashes = [];
+  let nTarget=0, nExcluded=0, nDup=0, nBadKey=0;
+  const unmatched = new Map();
+  const seen = new Set();
+
+  for(let i=hdr.headerRow+1; i<rows.length; i++){
+    const row = rows[i];
+    if(!row || row.every(v => v === '' || v == null)) continue;
+    const vin = String(row[iVin] ?? '').trim();
+    const cpn = String(row[iCpn] ?? '').trim();
+    if(!vin && !cpn){ nBadKey++; continue; }
+    const hash = (vin + String(row[iRef] ?? '') + cpn).replace(/\s+/g,'').toUpperCase();
+    if(seen.has(hash)){ nDup++; continue; }
+    seen.add(hash);
+    if(String(row[iStatus] ?? '').trim() !== '전송'){ nExcluded++; continue; }
+    if(known.has(hash)){ continue; }   // 기정산 제외
+
+    const total = eo3vNum(row[iTot]);
+    const brand = vin.charAt(2).toUpperCase() === 'L' ? 'lr' : 'jg';
+    const site = String(row[iSite] ?? '').trim();
+    const code = EO3V.WS_MAP[site];
+    if(!code){ unmatched.set(site || '(빈값)', (unmatched.get(site || '(빈값)')||0) + 1); continue; }
+
+    let g = byWs.get(code);
+    if(!g){ g = { jg: blank(), lr: blank() }; byWs.set(code, g); }
+    const a = g[brand];
+    a.n++;
+    a.customer += total * EO3V.CUSTOMER_RATE;
+    a.castrol  += EO3V.CASTROL_PER;
+    a.vme      += total * (1 - EO3V.CUSTOMER_RATE) - EO3V.CASTROL_PER;
+    nTarget++; targetHashes.push({ hash, code, keys:[vin, String(row[iRef] ?? ''), cpn], amount: total });
+  }
+  return { byWs, targetHashes, nTarget, nExcluded, nDup, nBadKey, unmatched };
+}
+
+// ── 쿠폰북정산내역 원본 → 지점별 인센티브 (판매 − 환불) × 단가 ──
+function parseEngineOilSales(buf){
+  const wb = XLSX.read(buf, { type:'array', cellDates:true });
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
+  const hdr = eo3vFindHeader(rows, ['유형','지점명']);
+  if(!hdr) throw new Error('쿠폰북 정산내역 원본에서 헤더(유형·지점명)를 찾지 못했습니다.');
+  const iType = hdr.map['유형'], iSite = hdr.map['지점명'];
+  const byWs = new Map();     // code → { sale, refund }
+  const unmatched = new Map();
+  for(let i=hdr.headerRow+1; i<rows.length; i++){
+    const row = rows[i];
+    if(!row || row.every(v => v === '' || v == null)) continue;
+    const site = String(row[iSite] ?? '').trim();
+    const code = EO3V.WS_MAP[site];
+    if(!code){ if(site) unmatched.set(site, (unmatched.get(site)||0)+1); continue; }
+    const t = String(row[iType] ?? '').trim();
+    let g = byWs.get(code);
+    if(!g){ g = { sale:0, refund:0 }; byWs.set(code, g); }
+    if(t === '판매') g.sale++;
+    else if(t === '환불') g.refund++;
+    // 반품은 인센티브 대상 아님 (사용자 확인 2026-08-31)
+  }
+  return { byWs, unmatched };
+}
+
+// ── 3종 바우처 미리보기 렌더 ──
+async function renderEngineOilSection(round, type, claims){
+  const host = document.getElementById('reviewSection');
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">원본 업로드 — 바우처 3종 (시스템 산출)</div>
+    <div class="hint">
+      리테일러 입력이 없는 유형입니다. 관리자가 원본 2개를 올리면 시스템이
+      <b>사용반환금 / Retailer Support / Sales Incentive</b> 3종을 계산합니다.<br>
+      쿠폰 클레임: <b>클레임상태=전송</b> AND 아직 정산되지 않은 건만. 중복키: 차대번호+참조번호+쿠폰번호.
+    </div>
+    <div class="row2" style="max-width:620px; margin-top:12px;">
+      <div class="field"><label>① 쿠폰 클레임 원본 (CouponClaim 현황)</label>
+        <input type="file" id="eoCoupon" accept=".xlsx,.xls"></div>
+      <div class="field"><label>② 쿠폰북 정산내역 원본 (Sales Incentive용)</label>
+        <input type="file" id="eoSales" accept=".xlsx,.xls"></div>
+    </div>
+    <div class="hint">② 없이 ①만 올리면 사용반환금·Retailer Support만 미리보기됩니다.</div>
+    <div id="eoResult"></div>`;
+  host.appendChild(card);
+
+  const run = async () => {
+    const cf = document.getElementById('eoCoupon').files[0];
+    const sf = document.getElementById('eoSales').files[0];
+    if(!cf) return;
+    const out = document.getElementById('eoResult');
+    out.innerHTML = '<div class="hint">분석 중...</div>';
+    try{
+      const coupon = await parseEngineOilCoupon(await cf.arrayBuffer(), type);
+      const sales = sf ? parseEngineOilSales(await sf.arrayBuffer()) : null;
+      window.__eo3v = { coupon, sales, round_id: round.id };
+      out.innerHTML = renderEngineOilPreview(coupon, sales);
+    } catch(err){
+      console.error(err);
+      out.innerHTML = `<div class="hint" style="color:var(--danger);">${err.message}</div>`;
+    }
+  };
+  document.getElementById('eoCoupon').addEventListener('change', run);
+  document.getElementById('eoSales').addEventListener('change', run);
+}
+
+function renderEngineOilPreview(coupon, sales){
+  const codes = Array.from(coupon.byWs.keys()).sort();
+  const won = (n) => fmtWon(Math.round(n));
+  let tCust=0, tVme=0, tCast=0;
+
+  // ① 사용반환금
+  let r1 = codes.map(code => {
+    const g = coupon.byWs.get(code);
+    const jg = g.jg.customer, lr = g.lr.customer;
+    tCust += jg + lr;
+    return `<tr><td>${code}</td><td style="text-align:right;">${won(jg)}</td>
+      <td style="text-align:right;">${won(lr)}</td><td style="text-align:right;">${won(jg+lr)}</td></tr>`;
+  }).join('');
+
+  // ② Retailer Support
+  let jgVme=0, lrVme=0, jgCast=0, lrCast=0;
+  let r2 = codes.map(code => {
+    const g = coupon.byWs.get(code);
+    jgVme+=g.jg.vme; lrVme+=g.lr.vme; jgCast+=g.jg.castrol; lrCast+=g.lr.castrol;
+    const rowT = g.jg.vme+g.lr.vme+g.jg.castrol+g.lr.castrol;
+    return `<tr><td>${code}</td>
+      <td style="text-align:right;">${won(g.jg.vme)}</td><td style="text-align:right;">${won(g.lr.vme)}</td>
+      <td style="text-align:right;">${won(g.jg.castrol)}</td><td style="text-align:right;">${won(g.lr.castrol)}</td>
+      <td style="text-align:right;">${won(rowT)}</td></tr>`;
+  }).join('');
+  tVme = jgVme+lrVme; tCast = jgCast+lrCast;
+
+  // ③ Sales Incentive
+  let r3 = '', tInc = 0, incCnt = 0;
+  if(sales){
+    const scodes = Array.from(sales.byWs.keys()).sort();
+    r3 = scodes.map(code => {
+      const g = sales.byWs.get(code);
+      const fin = g.sale - g.refund;
+      const amt = fin * EO3V.INCENTIVE_UNIT;
+      tInc += amt; incCnt += fin;
+      return `<tr><td>${code}</td><td style="text-align:right;">${g.sale}</td>
+        <td style="text-align:right;">${g.refund}</td><td style="text-align:right;">${fin}</td>
+        <td style="text-align:right;">${won(amt)}</td></tr>`;
+    }).join('');
+  }
+
+  const unmatchedHtml = (m, label) => m && m.size
+    ? `<div class="hint" style="color:var(--accent-ar); margin-top:6px;">⚠️ ${label} 미매칭 지점: ${Array.from(m.entries()).map(([k,v])=>`${k}(${v})`).join(', ')}</div>` : '';
+
+  return `
+    <div class="stat-row" style="margin-top:14px;">
+      <div class="stat-card" style="flex:1;"><div class="stat-num" style="color:var(--accent);">${coupon.nTarget}</div><div class="stat-label">정산 대상 건</div></div>
+      <div class="stat-card" style="flex:1;"><div class="stat-num" style="color:var(--text-dim);">${coupon.nExcluded}</div><div class="stat-label">미전송 제외</div></div>
+      ${coupon.nDup?`<div class="stat-card" style="flex:1;"><div class="stat-num" style="color:var(--danger);">${coupon.nDup}</div><div class="stat-label">파일 내 중복</div></div>`:''}
+    </div>
+    ${unmatchedHtml(coupon.unmatched, '쿠폰 클레임')}
+    ${sales?unmatchedHtml(sales.unmatched, '쿠폰북 정산내역'):''}
+
+    <div class="section-label">① 사용반환금 · GL 702030000 · VAT 0%</div>
+    <table><thead><tr><th>지점</th><th style="text-align:right;">JG(고객)</th><th style="text-align:right;">LR(고객)</th><th style="text-align:right;">합계</th></tr></thead>
+      <tbody>${r1}</tbody>
+      <tfoot><tr style="font-weight:600;"><td>합계</td><td style="text-align:right;">${won(codes.reduce((a,c)=>a+coupon.byWs.get(c).jg.customer,0))}</td>
+        <td style="text-align:right;">${won(codes.reduce((a,c)=>a+coupon.byWs.get(c).lr.customer,0))}</td><td style="text-align:right;">${won(tCust)}</td></tr></tfoot>
+    </table>
+
+    <div class="section-label">② Retailer Support · GL 700050800(VME) + 1105020600(Castrol) · VAT 0%</div>
+    <table><thead><tr><th>지점</th><th style="text-align:right;">JG VME</th><th style="text-align:right;">LR VME</th><th style="text-align:right;">JG Castrol</th><th style="text-align:right;">LR Castrol</th><th style="text-align:right;">합계</th></tr></thead>
+      <tbody>${r2}</tbody>
+      <tfoot><tr style="font-weight:600;"><td>합계</td><td style="text-align:right;">${won(jgVme)}</td><td style="text-align:right;">${won(lrVme)}</td>
+        <td style="text-align:right;">${won(jgCast)}</td><td style="text-align:right;">${won(lrCast)}</td><td style="text-align:right;">${won(tVme+tCast)}</td></tr></tfoot>
+    </table>
+
+    ${sales ? `
+    <div class="section-label">③ Sales Incentive · GL 700050800 · VAT 0% · 최종판매 × ${EO3V.INCENTIVE_UNIT.toLocaleString('ko-KR')}원 · 고정 JG 10 : LR 90</div>
+    <table><thead><tr><th>지점</th><th style="text-align:right;">판매</th><th style="text-align:right;">환불</th><th style="text-align:right;">최종판매</th><th style="text-align:right;">금액</th></tr></thead>
+      <tbody>${r3}</tbody>
+      <tfoot><tr style="font-weight:600;"><td>합계</td><td></td><td></td><td style="text-align:right;">${incCnt}</td><td style="text-align:right;">${won(tInc)}</td></tr></tfoot>
+    </table>
+    <div class="hint">표지 배분: LR = ${won(Math.round(tInc*0.9))} / JG = ${won(tInc - Math.round(tInc*0.9))}</div>
+    ` : '<div class="hint" style="margin-top:10px;">② 쿠폰북 정산내역 원본을 올리면 Sales Incentive가 계산됩니다.</div>'}
+
+    <div class="info-card" style="margin-top:16px;">
+      <div class="section-label" style="margin-top:0;">검증</div>
+      <div class="hint">
+        고객(${won(tCust)}) + VME(${won(tVme)}) + Castrol(${won(tCast)}) = <b>${won(tCust+tVme+tCast)}</b>
+        &nbsp;→ 쿠폰 고객 80% + 쿠폰 KR 20% 구조.<br>
+        ※ 미리보기 단계입니다. 리테일러 정산 확정 화면과 바우처 생성은 다음 단계에서 붙습니다.
+      </div>
+    </div>`;
+}
+
 /* ---------- SYSTEM 유형: 원본 업로드 → 분류 결과 표시 ---------- */
 async function renderSystemSourceSection(round, type, claims){
+  if(type.source_config?.preset === 'ENGINE_OIL_3V'){
+    return renderEngineOilSection(round, type, claims);
+  }
   const host = document.getElementById('reviewSection');
   const card = document.createElement('div');
   card.className = 'info-card';
