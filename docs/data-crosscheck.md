@@ -55,9 +55,12 @@ AJ·HS·WB는 한 리테일러 = 사업자번호 여러 개 = 세금계산서 �
 - **충돌:** 효성 센텀 지점 — One DMS 파일에선 `KR01030MIS`, Engine Oil AR 파일에선 `KR01170MIS`. 어느 게 맞는지 확인.
 - **필요:** 지점별 `customer_code` + (AP와 다를 때만) `ar_biz_no` 목록. 주면 마이그레이션으로 seed.
 
-## 사용자에게 필요한 것 (요약)
-1. 효성 센텀 사업자번호 `2548500545` 맞나? (seed `1728600556` 교체)
-2. 인타이어 대구 / 위본 전주 — 상황별로 어느 사업자번호가 맞는지
-3. 세금계산서를 `biz_no` 단위로 발행하도록 되돌릴지 (AJ·HS·WB 때문에). 되돌리면 Engine Oil 외 유형에 적용
-4. AR 거래처 마스터 (지점별 customer code + ar_biz_no)
-5. 효성 센텀 AR customer code — `KR01030MIS` vs `KR01170MIS`
+## 사용자 답변 (2026-09-01) 및 반영 상태
+1. ✅ 효성 센텀 사업자번호 = **254-85-00545** 확정 → `migration 019`에서 교체
+2. ✅ 인타이어 대구 = **707…**(`5148147707`, AR용 ar_biz_no) / 위본 전주 = **509…**(`5098503267`, AP=AR 동일) → `migration 019`
+3. ⏳ 세금계산서를 **사업자번호 단위**로 발행 — AJ·HS·WB는 그룹 내 사업자번호 2개라 회차당 2장 되는 점 재확인 중.
+   확정 시: 인보이스 롤업을 biz_no 기준으로 (`buildRetailerSummary` → biz_no 그룹), unique(round_id, biz_no) 마이그레이션.
+4. ✅ AR 거래처 마스터 (`AR_.xlsx`) 수신 → `migration 019`에서 20개 지점 `customer_code` 시드
+5. ✅ 효성 센텀 AR code = **KR01170MIS** (DMS의 KR01030MIS 아님) → `migration 019`
+
+미해결: 천일 **천안(CH-CA)** 지점이 DB `workshops`에 없음 (AR 마스터·Engine Oil 원본엔 등장). 정산 대상이면 신규 등록 필요.
