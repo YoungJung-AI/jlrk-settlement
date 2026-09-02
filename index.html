@@ -3538,6 +3538,14 @@ async function renderRoundDetail(){
     });
     actions.appendChild(btn);
     appendDueEditor(actions, round, type);
+    if((claims||[]).length === 0){
+      const regen = document.createElement('button');
+      regen.className = 'btn btn-ghost'; regen.style.marginLeft = '8px';
+      regen.textContent = '청구 대상 다시 생성';
+      regen.title = '개설됐지만 청구 대상이 0건인 경우 대상 리테일러/지점을 다시 만듭니다';
+      regen.addEventListener('click', () => regenerateClaimTargets(round, type));
+      actions.appendChild(regen);
+    }
   } else if(round.status === 'CLOSED'){
     const pending = (claims||[]).filter(c => c.status === 'SUBMITTED').length;
     const wrap = document.createElement('div');
@@ -5177,15 +5185,13 @@ async function generateVoucher(round, type, claims, readyInvoices, selections, p
   }
 }
 
-async function openRound(round, type){
-  if(!confirm(`${round.period_label} 회차를 개설할까요? 대상 리테일러/지점에 청구 항목이 생성됩니다.`)) return;
-
+// 회차의 청구 대상(리테일러/지점) 행 목록 생성 — openRound / 대상 재생성 공용
+async function buildClaimRows(round, type){
   let targetRetailerIds = type.target_retailers;
   if(!targetRetailerIds || targetRetailerIds.length === 0){
     const { data: allRet } = await sb.from('retailers').select('id').eq('is_active', true);
     targetRetailerIds = (allRet||[]).map(r => r.id);
   }
-
   let claimRows = [];
   if(type.claim_unit === 'WORKSHOP'){
     const { data: ws } = await sb.from('workshops').select('id, retailer_id').eq('is_active', true).in('retailer_id', targetRetailerIds);
@@ -5193,6 +5199,26 @@ async function openRound(round, type){
   } else {
     claimRows = targetRetailerIds.map(rid => ({ round_id: round.id, retailer_id: rid }));
   }
+  return { targetRetailerIds, claimRows };
+}
+
+// 이미 OPEN인데 청구 대상이 0건이 된 회차 복구용 — 상태·메일은 건드리지 않고 대상만 다시 생성
+async function regenerateClaimTargets(round, type){
+  const { data: existing } = await sb.from('claims').select('id').eq('round_id', round.id);
+  if((existing||[]).length > 0){ alert('이미 청구 항목이 있습니다.'); await renderRoundDetail(); return; }
+  const { claimRows } = await buildClaimRows(round, type);
+  if(claimRows.length === 0){ alert('대상 리테일러/지점이 없습니다.'); return; }
+  if(!confirm(`이 회차의 청구 대상 ${claimRows.length}건을 다시 생성합니다. 계속할까요?`)) return;
+  const { error } = await sb.from('claims').insert(claimRows);
+  if(error){ alert('생성 실패: ' + error.message); return; }
+  await logAudit('ROUND_OPEN','ROUND',round.id,{label:`${type.name} · ${round.period_label} · 청구 대상 재생성 ${claimRows.length}건`});
+  await renderRoundDetail();
+}
+
+async function openRound(round, type){
+  if(!confirm(`${round.period_label} 회차를 개설할까요? 대상 리테일러/지점에 청구 항목이 생성됩니다.`)) return;
+
+  const { targetRetailerIds, claimRows } = await buildClaimRows(round, type);
 
   if(claimRows.length === 0){ alert('대상 리테일러/지점이 없습니다.'); return; }
 
