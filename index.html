@@ -742,8 +742,9 @@ function formatAmountInput(el){
   });
 }
 function readAmountInput(el){
-  const n = parseInt(el.value.replace(/[^\d]/g, ''), 10);
-  return isNaN(n) ? null : n;
+  // 소수점이 섞여 들어와도 자릿수가 튀지 않도록 parseFloat 후 반올림
+  const n = parseFloat(String(el.value).replace(/[^\d.]/g, ''));
+  return isNaN(n) ? null : Math.round(n);
 }
 function updateGroupTotal(card){
   let sum = 0;
@@ -820,7 +821,8 @@ function parseClaimWorkbook(arrayBuffer){
     if(agg.has(key)) agg.get(key).amount += amt;
     else agg.set(key, { label: labelStr, amount: amt });
   }
-  return Array.from(agg.values());
+  // 라인아이템 합산 시 부동소수 오차(...25 등)가 남으므로 지점 금액은 원 단위로 반올림
+  return Array.from(agg.values()).map(v => ({ label: v.label, amount: Math.round(v.amount) }));
 }
 
 function matchWorkshop(label){
@@ -1020,7 +1022,7 @@ async function getRetailerEmails(retailerIds){
   return (data||[]).map(r => r.email).filter(Boolean);
 }
 
-const fmtWon = (n) => Number(n||0).toLocaleString('ko-KR') + '원';
+const fmtWon = (n) => Math.round(Number(n)||0).toLocaleString('ko-KR') + '원';
 const fmtDate = (d) => d ? new Date(d).toLocaleString('ko-KR') : '미설정';
 
 /* ---------- 감사로그 ---------- */
@@ -5250,9 +5252,22 @@ async function openRound(round, type){
 }
 
 async function downloadFile(path, downloadName){
-  const opts = downloadName ? { download: downloadName } : undefined;
-  const { data, error } = await sb.storage.from('settlements').createSignedUrl(path, 60, opts);
+  const { data, error } = await sb.storage.from('settlements').createSignedUrl(path, 60);
   if(error){ alert('다운로드 실패: ' + error.message); return; }
+  // 한글 파일명을 안전하게 지정하려면 blob 로 받아 <a download> 로 저장 (URL 파라미터는 인코딩이 깨짐)
+  if(downloadName){
+    try{
+      const resp = await fetch(data.signedUrl);
+      if(!resp.ok) throw new Error(String(resp.status));
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = downloadName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      return;
+    }catch(e){ /* 실패 시 새 탭으로 폴백 */ }
+  }
   window.open(data.signedUrl, '_blank');
 }
 
