@@ -1019,7 +1019,7 @@ async function logAudit(action, targetType, targetId, payload){
 }
 
 const AUDIT_LABEL = {
-  ROUND_CREATE:'회차 생성', ROUND_OPEN:'회차 개설(청구요청)', ROUND_CLOSE:'청구 마감',
+  ROUND_CREATE:'회차 생성', ROUND_OPEN:'회차 개설(청구요청)', ROUND_CLOSE:'청구 마감', ROUND_DUE_EDIT:'청구 마감일시 수정',
   ROUND_CONFIRM:'확정금액 공지', ROUND_INVOICED:'계산서 접수완료', ROUND_VOUCHERED:'바우처 완료처리',
   ROUND_ARCHIVE:'아카이브(서버 정리)',
   AR_TARGETS:'AR 청구대상 생성', AR_AMOUNT_SAVE:'AR 청구금액 저장', AR_SOURCE_PARSE:'AR 원천 집계',
@@ -3442,6 +3442,45 @@ async function openRoundDetail(roundId){
   await renderRoundDetail();
 }
 
+// datetime-local 입력값(YYYY-MM-DDTHH:mm)으로 변환 — 저장된 ISO를 브라우저 로컬시간 기준으로
+function toLocalInputValue(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// 회차 상세 상단에 "청구 마감일시 수정" 인라인 편집기를 붙인다 (관리자 · CLOSED 전까지)
+function appendDueEditor(actions, round, type){
+  const box = document.createElement('div');
+  box.style.marginTop = '8px';
+  box.innerHTML = `
+    <button class="btn btn-ghost btn-sm" id="rdDueEditBtn">청구 마감일시 수정</button>
+    <span id="rdDueEditForm" style="display:none;">
+      <input type="datetime-local" id="rdDueEditInput" style="width:auto; margin-right:6px;">
+      <button class="btn btn-sm" id="rdDueEditSave">저장</button>
+      <button class="btn btn-ghost btn-sm" id="rdDueEditCancel">취소</button>
+    </span>`;
+  actions.appendChild(box);
+  const form = box.querySelector('#rdDueEditForm');
+  const input = box.querySelector('#rdDueEditInput');
+  box.querySelector('#rdDueEditBtn').addEventListener('click', () => {
+    input.value = toLocalInputValue(round.claim_due_at);
+    form.style.display = 'inline';
+    box.querySelector('#rdDueEditBtn').style.display = 'none';
+  });
+  box.querySelector('#rdDueEditCancel').addEventListener('click', () => renderRoundDetail());
+  box.querySelector('#rdDueEditSave').addEventListener('click', async () => {
+    const v = input.value;
+    if(!v){ alert('마감일시를 입력하세요.'); return; }
+    const iso = new Date(v).toISOString();
+    const { error } = await sb.from('rounds').update({ claim_due_at: iso }).eq('id', round.id);
+    if(error){ alert('수정 실패: ' + error.message); return; }
+    await logAudit('ROUND_DUE_EDIT','ROUND',round.id,{label:`${type.name} · ${round.period_label} → ${new Date(iso).toLocaleString('ko-KR')}`});
+    await renderRoundDetail();
+  });
+}
+
 async function renderRoundDetail(){
   const { data: round, error } = await sb.from('rounds').select('*, settlement_types(*)').eq('id', currentRoundId).single();
   if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
@@ -3481,6 +3520,7 @@ async function renderRoundDetail(){
     hint.textContent = '※ 이메일 알림 상태 확인 중...';
     checkEmailStatus();
     actions.appendChild(hint);
+    appendDueEditor(actions, round, type);
   } else if(round.status === 'OPEN'){
     const remindBtn = document.createElement('button');
     remindBtn.className = 'btn btn-ghost'; remindBtn.textContent = '미제출 리테일러 독촉';
@@ -3497,6 +3537,7 @@ async function renderRoundDetail(){
       await renderRoundDetail();
     });
     actions.appendChild(btn);
+    appendDueEditor(actions, round, type);
   } else if(round.status === 'CLOSED'){
     const pending = (claims||[]).filter(c => c.status === 'SUBMITTED').length;
     const wrap = document.createElement('div');
