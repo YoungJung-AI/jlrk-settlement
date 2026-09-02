@@ -2929,14 +2929,19 @@ async function getPrevRoundAmounts(round, claims){
 /* ---------- 미제출 리테일러 독촉 메일 ---------- */
 async function remindUnsubmitted(round, type, claims){
   const targets = (claims||[]).filter(c => c.status === 'NOT_SUBMITTED');
-  if(targets.length === 0){ alert('미제출 리테일러가 없습니다.'); return; }
+  if(targets.length === 0){ alert('미제출 리테일러가 없습니다. (미제출 상태인 청구 항목이 없음 — 이미 전부 제출됐거나 대상이 아님)'); return; }
   const ids = Array.from(new Set(targets.map(c => c.retailer_id)));
   if(!confirm(`미제출 리테일러 ${ids.length}곳에 독촉 메일을 보낼까요?`)) return;
 
-  let sent = 0;
+  const okList = [], skipList = [];
   for(const rid of ids){
-    const emails = await getRetailerEmails([rid]);
-    if(emails.length === 0) continue;
+    const rc = targets.find(c => c.retailer_id === rid);
+    const rname = rc?.retailers?.code || rc?.retailers?.name || rid;
+    const email = rc?.retailers?.email;
+    if(!email || /placeholder@example\.com/i.test(email)){
+      skipList.push(`${rname} — 알림 이메일 미등록 (현재: ${email || '없음'})`);
+      continue;
+    }
     const mine = targets.filter(c => c.retailer_id === rid);
     const html = emailShell('청구서 미제출 안내', `
       <table style="${EMAIL_STYLE}border-collapse:collapse;">
@@ -2946,10 +2951,15 @@ async function remindUnsubmitted(round, type, claims){
         <tr><td style="padding:4px 12px 4px 0;color:#666;">제출 마감</td><td><b style="color:#c0392b;">${fmtDate(round.claim_due_at)}</b></td></tr>
       </table>
       <p style="margin-top:16px;">아직 청구서가 제출되지 않았습니다. 마감 전까지 포털에서 제출해주세요.</p>`);
-    if(await sendEmail(emails, `[JLRK 정산] ${round.period_label} 청구서 미제출 안내`, html)) sent++;
+    const ok = await sendEmail(email, `[JLRK 정산] ${round.period_label} 청구서 미제출 안내`, html);
+    if(ok) okList.push(`${rname} → ${email}`);
+    else skipList.push(`${rname} — 발송 실패 (브라우저 콘솔의 [알림] 로그 확인)`);
   }
-  await logAudit('REMIND_SEND','ROUND',round.id,{label:`${sent}곳 독촉 발송`});
-  alert(`${sent}곳에 발송했습니다.${sent<ids.length?`\n(${ids.length-sent}곳은 이메일 미등록으로 제외)`:''}`);
+  await logAudit('REMIND_SEND','ROUND',round.id,{label:`${okList.length}곳 독촉 발송`});
+  let msg = `발송 완료: ${okList.length}곳`;
+  if(okList.length) msg += `\n- ` + okList.join(`\n- `);
+  if(skipList.length) msg += `\n\n제외: ${skipList.length}곳\n- ` + skipList.join(`\n- `);
+  alert(msg);
 }
 
 /* ---------- 회차 복제 ---------- */
