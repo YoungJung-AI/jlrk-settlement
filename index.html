@@ -3157,12 +3157,17 @@ async function loadAccounts(){
 }
 
 function genPassword(){
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
-  let s = '';
-  const arr = new Uint32Array(12);
-  crypto.getRandomValues(arr);
-  arr.forEach(n => { s += chars[n % chars.length]; });
-  return s;
+  // Supabase Auth 비밀번호 정책(대/소문자·숫자·기호 요구)에 걸리지 않도록
+  // 각 문자군을 최소 1개씩 보장한다. (0,1,I,O,l 등 혼동 문자는 제외)
+  const U = 'ABCDEFGHJKLMNPQRSTUVWXYZ', L = 'abcdefghijkmnpqrstuvwxyz', D = '23456789', S = '!@#$%^&*-_';
+  const all = U + L + D + S;
+  const pick = (set) => { const a = new Uint32Array(1); crypto.getRandomValues(a); return set[a[0] % set.length]; };
+  const s = [pick(U), pick(L), pick(D), pick(S)];
+  const rest = new Uint32Array(9);
+  crypto.getRandomValues(rest);
+  rest.forEach(n => s.push(all[n % all.length]));
+  for(let i = s.length - 1; i > 0; i--){ const j = pick([...Array(i + 1).keys()]); [s[i], s[j]] = [s[j], s[i]]; }
+  return s.join('');
 }
 
 document.getElementById('ac_genpw').addEventListener('click', () => {
