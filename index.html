@@ -2551,19 +2551,23 @@ function parseOneDmsRaw(buf, type, fiscalYear, retailersList){
   if(rate == null) throw new Error(`FY 단가를 찾지 못했습니다: "${fiscalYear||'(비어있음)'}". 회차의 회계연도(fiscal_year)를 확인하거나 유형 설정 source_config.fy_rates 에 추가하세요.`);
 
   const wb = XLSX.read(buf, { type:'array', cellDates:true });
-  const sheetName = (type.source_config?.sheet && wb.SheetNames.includes(type.source_config.sheet))
-    ? type.source_config.sheet : wb.SheetNames[0];
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header:1, defval:'', raw:false });
-
-  let hr = -1, H = {};
-  for(let i=0; i<Math.min(rows.length, 15); i++){
-    const map = {};
-    (rows[i]||[]).forEach((h, idx) => { const t = String(h ?? '').trim(); if(t && map[t] === undefined) map[t] = idx; });
-    const hasDealer = Object.keys(map).some(k => /딜러사|딜러|리테일러|dealer/i.test(k));
-    const hasName = Object.keys(map).some(k => /이름|성명|name/i.test(k));
-    if(hasDealer && hasName){ hr = i; H = map; break; }
+  // 지정 시트가 있으면 그것만, 없으면 딜러사+이름 헤더가 있는 시트를 전 시트에서 찾는다
+  // (One DMS 원본은 '집계'(피벗)가 첫 시트, 실제 명단은 뒤 시트인 경우가 있음)
+  const tryOrder = (type.source_config?.sheet && wb.SheetNames.includes(type.source_config.sheet))
+    ? [type.source_config.sheet] : wb.SheetNames;
+  let rows = [], hr = -1, H = {};
+  for(const sn of tryOrder){
+    const rws = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header:1, defval:'', raw:false });
+    for(let i=0; i<Math.min(rws.length, 15); i++){
+      const map = {};
+      (rws[i]||[]).forEach((h, idx) => { const t = String(h ?? '').trim(); if(t && map[t] === undefined) map[t] = idx; });
+      const hasDealer = Object.keys(map).some(k => /딜러사|딜러|리테일러|dealer/i.test(k));
+      const hasName = Object.keys(map).some(k => /이름|성명|name/i.test(k));
+      if(hasDealer && hasName){ rows = rws; hr = i; H = map; break; }
+    }
+    if(hr >= 0) break;
   }
-  if(hr < 0) throw new Error('헤더 행(딜러사·이름 포함)을 찾지 못했습니다.');
+  if(hr < 0) throw new Error('헤더 행(딜러사·이름 포함)을 찾지 못했습니다. 원본 시트에 명단이 있는지 확인하세요.');
 
   const findCol = (re) => { const k = Object.keys(H).find(x => re.test(x)); return k !== undefined ? H[k] : undefined; };
   const cDealer = findCol(/딜러사|딜러|리테일러|dealer/i);
