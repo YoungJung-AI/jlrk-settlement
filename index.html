@@ -2264,6 +2264,550 @@ async function renderEngineOilRetailerCard(listEl, round, items){
 }
 
 /* ================================================================
+   One DMS License Fee — 시스템 산출 AR (JLRK → 리테일러 청구)
+   유형 설정: amount_mode='SYSTEM' + source_config.preset='ONE_DMS_AR' + direction='AR'
+   로우데이터(1인 1행, 월별 라이선스 종류 칸) → 리테일러별 활성 유저-month 집계
+   금액 = Σ(월별 활성유저) × FY 유저당 월단가.  ★ 라이선스 종류·단가는 리테일러 비공개.
+   대표지점 코드는 기존 AR 마스터와 다름(사용자 확인 2026-09-04) → ONE_DMS.REP_BRANCH 별도 보관.
+   ================================================================ */
+const ONE_DMS = {
+  QUARTER_MONTHS: 3,
+  FY_RATES: {
+    'FY24/25': 112231.8333, 'FY25/26': 109536.9167,
+    'FY26/27': 109329.6667, 'FY27/28': 85283.25
+  },
+  GL_CODE: '605030101',
+  VAT_RATE: 0.10,
+  JG_RATIO: 0.10,
+  EXCLUDE: ['JLRK 본사', 'JLRK본사', '브리티시 오토', '브리티시오토', '브리티시오토(도이치)', '브리티시'],
+  DEALER_MAP: {
+    '아주네트웍스':'AJ', 'KCC오토모빌':'KCC', '천일오토모빌':'CH',
+    '위본오토모티브':'WB', '위본 오토모티브':'WB',
+    '효성프리미어모터스':'HS', '인타이어모터스':'EN', '한영모터스':'HY',
+    'JL모터스':'JL', '제이엘모터스':'JL'
+  },
+  REP_BRANCH: {
+    AJ:  { customer_code:'KR00470MIS', biz_no:'2148800795',   label:'아주-한남' },
+    CH:  { customer_code:'KR01048MIS', biz_no:'2148835620',   label:'천일-성수' },
+    KCC: { customer_code:'KR01074MIS', biz_no:'1178159958',   label:'KCC-분당' },
+    HS:  { customer_code:'KR01030MIS', biz_no:'2548500545',   label:'효성-센텀' },
+    EN:  { customer_code:'KR01034MIS', biz_no:'5148147707',   label:'인타이어-대구' },
+    JL:  { customer_code:'KR00560MIS', biz_no:'3148626446',   label:'제이엘-대전' },
+    HY:  { customer_code:'KR01120MIS', biz_no:'6178149208',   label:'한영-부산' },
+    WB:  { customer_code:'KR01290MIS', biz_no:'466-85-01962', label:'위본-광주' }
+  }
+};
+
+function oneDmsParams(type){
+  const c = type?.source_config || {};
+  return {
+    QUARTER_MONTHS: Number(c.quarter_months) || ONE_DMS.QUARTER_MONTHS,
+    FY_RATES: { ...ONE_DMS.FY_RATES, ...(c.fy_rates || {}) },
+    EXCLUDE: c.exclude_dealers || ONE_DMS.EXCLUDE,
+    DEALER_MAP: { ...ONE_DMS.DEALER_MAP, ...(c.dealer_map || {}) },
+    REP_BRANCH: { ...ONE_DMS.REP_BRANCH, ...(c.rep_branch || {}) },
+    GL_CODE: c.gl_code || ONE_DMS.GL_CODE,
+    VAT_RATE: c.vat_rate != null ? Number(c.vat_rate) : ONE_DMS.VAT_RATE,
+    JG_RATIO: c.jg_ratio != null ? Number(c.jg_ratio) : ONE_DMS.JG_RATIO
+  };
+}
+
+// 회차 fiscal_year('FY27') → 단가맵 키('FY26/27') 로도 시도
+function oneDmsRate(P, fy){
+  if(!fy) return null;
+  const raw = String(fy).replace(/\s/g,'');
+  if(P.FY_RATES[raw] != null) return P.FY_RATES[raw];
+  const m = raw.match(/FY(\d{2})(?!\/)/i);
+  if(m){
+    const n = parseInt(m[1], 10);
+    const key = `FY${String(n-1).padStart(2,'0')}/${String(n).padStart(2,'0')}`;
+    if(P.FY_RATES[key] != null) return P.FY_RATES[key];
+  }
+  return null;
+}
+
+const _odNorm = (s) => String(s ?? '').replace(/\s+/g,'').trim();
+
+// 로우데이터 파싱 → 리테일러별 유저-month 집계 (활성 = 그 달 라이선스 칸 비어있지 않음)
+function parseOneDmsRaw(buf, type, fiscalYear, retailersList){
+  const P = oneDmsParams(type);
+  const rate = oneDmsRate(P, fiscalYear);
+  if(rate == null) throw new Error(`FY 단가를 찾지 못했습니다: "${fiscalYear||'(비어있음)'}". 회차의 회계연도(fiscal_year)를 확인하거나 유형 설정 source_config.fy_rates 에 추가하세요.`);
+
+  const wb = XLSX.read(buf, { type:'array', cellDates:true });
+  const sheetName = (type.source_config?.sheet && wb.SheetNames.includes(type.source_config.sheet))
+    ? type.source_config.sheet : wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header:1, defval:'', raw:false });
+
+  let hr = -1, H = {};
+  for(let i=0; i<Math.min(rows.length, 15); i++){
+    const map = {};
+    (rows[i]||[]).forEach((h, idx) => { const t = String(h ?? '').trim(); if(t && map[t] === undefined) map[t] = idx; });
+    const hasDealer = Object.keys(map).some(k => /딜러사|딜러|리테일러|dealer/i.test(k));
+    const hasName = Object.keys(map).some(k => /이름|성명|name/i.test(k));
+    if(hasDealer && hasName){ hr = i; H = map; break; }
+  }
+  if(hr < 0) throw new Error('헤더 행(딜러사·이름 포함)을 찾지 못했습니다.');
+
+  const findCol = (re) => { const k = Object.keys(H).find(x => re.test(x)); return k !== undefined ? H[k] : undefined; };
+  const cDealer = findCol(/딜러사|딜러|리테일러|dealer/i);
+  const cName   = findCol(/이름|성명|name/i);
+  const cLogin  = findCol(/로그인.*아이디|아이디|login|mail|메일/i);
+  const cRole   = findCol(/역할|role/i);
+  const cFirst  = findCol(/첫.*로그인|first.*login/i);
+  const cStatus = findCol(/재직|상태|status/i);
+  const cRetire = findCol(/퇴직|퇴사|retire/i);
+
+  const monthCols = [];
+  Object.keys(H).forEach(k => { if(/^\s*0?\d{1,2}\s*월\s*$/.test(k)) monthCols.push({ label: k.trim(), idx: H[k] }); });
+  monthCols.sort((a,b) => a.idx - b.idx);
+  if(monthCols.length === 0) throw new Error("월 컬럼('1월' · '01월' 등)을 찾지 못했습니다.");
+  const useMonths = monthCols.slice(0, P.QUARTER_MONTHS);
+
+  const rtByCode = new Map((retailersList || []).map(r => [r.code, r]));
+  const byRt = new Map();
+  const excluded = new Map(), unmatched = new Map();
+
+  for(let i = hr + 1; i < rows.length; i++){
+    const row = rows[i];
+    if(!row || row.every(c => c === '' || c == null)) continue;
+    const dealer = String(row[cDealer] ?? '').trim();
+    if(!dealer || /합계|소계|total/i.test(dealer)) continue;
+
+    if(P.EXCLUDE.some(x => _odNorm(x) === _odNorm(dealer))){
+      excluded.set(dealer, (excluded.get(dealer)||0)+1); continue;
+    }
+    let code = P.DEALER_MAP[dealer];
+    if(!code) code = Object.entries(P.DEALER_MAP).find(([k]) => _odNorm(k) === _odNorm(dealer))?.[1];
+    if(!code){ unmatched.set(dealer, (unmatched.get(dealer)||0)+1); continue; }
+
+    const flags = useMonths.map(m => String(row[m.idx] ?? '').trim() !== '');
+    const monthsActive = flags.filter(Boolean).length;
+    if(monthsActive === 0) continue;
+
+    let g = byRt.get(code);
+    if(!g){
+      const rt = rtByCode.get(code);
+      g = { code, retailer_id: rt?.id || null, retailer_name: rt?.name || dealer, dealerName: dealer, users: [], user_months: 0 };
+      byRt.set(code, g);
+    }
+    g.users.push({
+      name:   String(row[cName] ?? '').trim(),
+      login:  cLogin  !== undefined ? String(row[cLogin] ?? '').trim() : '',
+      role:   cRole   !== undefined ? String(row[cRole] ?? '').trim() : '',
+      first:  cFirst  !== undefined ? String(row[cFirst] ?? '').trim() : '',
+      status: cStatus !== undefined ? String(row[cStatus] ?? '').trim() : '',
+      retire: cRetire !== undefined ? String(row[cRetire] ?? '').trim() : '',
+      flags, months_active: monthsActive
+    });
+    g.user_months += monthsActive;
+  }
+
+  const retailers = [];
+  let gUM = 0, gAmt = 0;
+  byRt.forEach(g => {
+    g.amount = Math.round(g.user_months * rate);
+    g.users.sort((a,b) => String(a.name).localeCompare(String(b.name), 'ko'));
+    gUM += g.user_months; gAmt += g.amount;
+    retailers.push(g);
+  });
+  retailers.sort((a,b) => a.code.localeCompare(b.code));
+  const vat = Math.round(gAmt * P.VAT_RATE);
+  return {
+    monthLabels: useMonths.map(m => m.label),
+    allMonthLabels: monthCols.map(m => m.label),
+    rate, fiscalYear,
+    retailers,
+    grand: { user_months: gUM, amount: gAmt, vat, total: gAmt + vat },
+    excluded: [...excluded.entries()].map(([name, n]) => ({ name, rows: n })),
+    unmatched: [...unmatched.entries()].map(([name, n]) => ({ name, rows: n }))
+  };
+}
+
+function oneDmsPreviewHtml(p){
+  const won = (n) => fmtWon(Math.round(n||0));
+  const rows = p.retailers.map(r => `
+    <tr><td>${r.code}</td><td style="text-align:right;">${r.users.length}</td>
+      <td style="text-align:right;">${r.user_months}</td>
+      <td style="text-align:right;">${won(r.amount)}</td></tr>`).join('');
+  const warn = [];
+  if(p.excluded.length) warn.push(`제외 딜러: ${p.excluded.map(x=>`${x.name}(${x.rows}행)`).join(', ')}`);
+  if(p.unmatched.length) warn.push(`<span style="color:var(--accent-ar);">⚠️ 미매칭 딜러(집계 제외됨): ${p.unmatched.map(x=>`${x.name}(${x.rows}행)`).join(', ')}</span>`);
+  const monthNote = p.allMonthLabels.length > p.monthLabels.length
+    ? ` — 파일에 ${p.allMonthLabels.length}개월 있으나 <b>앞 ${p.monthLabels.length}개월만</b> 집계`
+    : '';
+  return `
+    <div class="hint" style="margin-top:10px;">회계연도 <b>${p.fiscalYear}</b> · 유저당 월단가 <b>${won(p.rate)}</b> · 집계월 <b>${p.monthLabels.join(' / ')}</b>${monthNote}</div>
+    ${warn.length ? `<div class="hint" style="margin-top:4px;">${warn.join('<br>')}</div>` : ''}
+    <table style="margin-top:10px;">
+      <thead><tr><th>리테일러</th><th style="text-align:right;">인원</th><th style="text-align:right;">유저-month</th><th style="text-align:right;">청구금액(공급가)</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr style="font-weight:600;"><td>합계</td>
+        <td style="text-align:right;">${p.retailers.reduce((a,r)=>a+r.users.length,0)}</td>
+        <td style="text-align:right;">${p.grand.user_months}</td>
+        <td style="text-align:right;">${won(p.grand.amount)}</td></tr></tfoot>
+    </table>
+    <div class="hint" style="margin-top:6px;">공급가 ${won(p.grand.amount)} + VAT ${won(p.grand.vat)} = <b>${won(p.grand.total)}</b> · JG:LR = 10:90 고정 · 라이선스 종류·단가는 리테일러 화면·다운로드에 표시되지 않습니다.</div>`;
+}
+
+async function renderOneDmsRoundDetail(round, type){
+  document.getElementById('claimsTable').style.display = 'none';
+  document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
+  document.getElementById('rd_status').innerHTML =
+    `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
+  document.getElementById('rd_meta').textContent = 'AR · 시스템 산출 (One DMS 라이선스) · 리테일러 확인만';
+  document.getElementById('rd_due').textContent = round.invoice_issue_date
+    ? `세금계산서 발행일 ${round.invoice_issue_date}` : '발행일 미설정';
+
+  ['rd_actions','reviewSection','invoiceSection','voucherSection'].forEach(id => {
+    const el = document.getElementById(id); if(el) el.innerHTML = '';
+  });
+  const actions = document.getElementById('rd_actions');
+
+  const { data: claims } = await sb.from('claims')
+    .select('*, retailers(code,name)').eq('round_id', round.id).order('created_at');
+  const confirmed = (claims||[]).filter(c => c.confirmed_at).length;
+  const total = claims?.length || 0;
+  document.getElementById('rd_progress').textContent = total ? `확정 ${confirmed} / ${total}` : '공지 전';
+
+  const { data: retailersList } = await sb.from('retailers').select('id, code, name').eq('is_active', true);
+
+  if(round.status === 'DRAFT'){
+    const P = oneDmsParams(type);
+    const fyGuess = round.fiscal_year || (round.period_label.match(/FY\s?\d{2}/i)?.[0]?.replace(/\s/,'') || '');
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="row2" style="max-width:520px;">
+        <div class="field"><label>회계연도 (단가 적용 기준)</label>
+          <input type="text" id="odFy" value="${fyGuess}" placeholder="예: FY27 또는 FY26/27">
+          <div class="hint" id="odFyHint"></div>
+        </div>
+        <div class="field"><label>세금계산서 발행일</label>
+          <input type="date" id="odIssueDate" value="${round.invoice_issue_date || new Date().toISOString().slice(0,10)}"></div>
+      </div>
+      <div class="field" style="max-width:520px;">
+        <label>One DMS 라이선스 로우데이터 (1인 1행 · 월별 라이선스 종류)</label>
+        <input type="file" id="odFile" accept=".xlsx,.xls">
+      </div>
+      <div id="odResult"></div>
+      <button class="btn" id="odPublishBtn" disabled style="margin-top:10px;">리테일러에 청구 공지</button>
+      <div class="hint" style="margin-top:6px;">파일을 올려 미리보기가 나오면 활성화됩니다.</div>`;
+    actions.appendChild(wrap);
+
+    const updateFyHint = () => {
+      const fy = document.getElementById('odFy').value.trim();
+      const r = oneDmsRate(P, fy);
+      document.getElementById('odFyHint').innerHTML = r != null
+        ? `유저당 월단가 <b>${fmtWon(r)}</b>`
+        : `<span style="color:var(--accent-ar);">해당 FY 단가 없음</span>`;
+    };
+    document.getElementById('odFy').addEventListener('input', updateFyHint);
+    updateFyHint();
+
+    const run = async () => {
+      const f = document.getElementById('odFile').files[0];
+      const fy = document.getElementById('odFy').value.trim();
+      const out = document.getElementById('odResult');
+      if(!f) return;
+      out.innerHTML = '<div class="hint">분석 중...</div>';
+      try{
+        const parsed = parseOneDmsRaw(await f.arrayBuffer(), type, fy, retailersList || []);
+        window.__onedms = { parsed, round_id: round.id, issueDate: document.getElementById('odIssueDate').value };
+        out.innerHTML = oneDmsPreviewHtml(parsed);
+        document.getElementById('odPublishBtn').disabled = parsed.retailers.length === 0;
+      }catch(err){
+        console.error(err);
+        out.innerHTML = `<div class="hint" style="color:var(--danger);">${err.message}</div>`;
+        document.getElementById('odPublishBtn').disabled = true;
+      }
+    };
+    document.getElementById('odFile').addEventListener('change', run);
+    document.getElementById('odFy').addEventListener('change', run);
+    document.getElementById('odPublishBtn').addEventListener('click', () => publishOneDmsRound(round, type));
+    return;
+  }
+
+  // PUBLISHED 이후
+  const s = round.source_summary || {};
+  const card = document.createElement('div');
+  card.className = 'info-card';
+  const rows = (claims||[]).map(c => `
+    <tr><td>${c.retailers?.code||''} ${c.retailers?.name||''}</td>
+      <td style="text-align:right;">${(c.detail?.user_count ?? (c.detail?.users||[]).length)}명 / ${c.detail?.user_months||0}</td>
+      <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
+      <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}</td>
+    </tr>`).join('');
+  card.innerHTML = `
+    <div class="section-label" style="margin-top:0;">리테일러 확정 현황 (${confirmed}/${total})</div>
+    <table><thead><tr><th>리테일러</th><th style="text-align:right;">인원 / 유저-month</th><th style="text-align:right;">청구금액</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint" style="margin-top:8px;">합계 ${fmtWon(s.grand?.amount)} · VAT ${fmtWon(s.grand?.vat)} · Total ${fmtWon(s.grand?.total)} · 유저당 월단가 ${fmtWon(s.rate)} (${s.fiscal_year||''})</div>`;
+  document.getElementById('reviewSection').appendChild(card);
+
+  const vs = document.getElementById('voucherSection');
+  if(round.status === 'PUBLISHED'){
+    const allDone = total > 0 && confirmed === total;
+    const b = document.createElement('button');
+    b.className = 'btn';
+    b.textContent = allDone ? '최종 확정' : `최종 확정 (미확인 ${total-confirmed}곳 포함)`;
+    b.addEventListener('click', () => finalizeOneDmsRound(round, type));
+    vs.appendChild(b);
+  } else if(['FINALIZED','VOUCHERED'].includes(round.status)){
+    if(!type.voucher_template_path){
+      vs.innerHTML = '<div class="hint" style="color:var(--accent-ar);">AR 바우처 템플릿이 유형 설정에 업로드되어 있지 않습니다.</div>';
+    } else {
+      const b = document.createElement('button');
+      b.className = 'btn';
+      b.textContent = round.status === 'VOUCHERED' ? 'AR 바우처 다시 생성' : 'AR 바우처 생성';
+      b.addEventListener('click', () => generateOneDmsVoucher(round, type, claims));
+      vs.appendChild(b);
+      const p = document.createElement('div'); p.id = 'ar_voucher_progress'; p.className = 'hint'; p.style.marginTop = '8px';
+      vs.appendChild(p);
+    }
+    const re = document.createElement('button');
+    re.className = 'btn btn-ghost'; re.style.marginLeft = '8px'; re.textContent = '원본 다시 올리기 (DRAFT로)';
+    re.addEventListener('click', async () => {
+      if(!confirm('DRAFT로 되돌리면 리테일러 확정도 초기화됩니다. 계속할까요?')) return;
+      await sb.from('claims').delete().eq('round_id', round.id);
+      await sb.from('rounds').update({ status:'DRAFT', source_summary:null }).eq('id', round.id);
+      await renderRoundDetail();
+    });
+    vs.appendChild(re);
+  }
+}
+
+async function publishOneDmsRound(round, type){
+  const od = window.__onedms;
+  if(!od || od.round_id !== round.id || !od.parsed){ alert('미리보기가 없습니다. 파일을 다시 올려주세요.'); return; }
+  const p = od.parsed;
+  const P = oneDmsParams(type);
+  const btn = document.getElementById('odPublishBtn');
+  btn.disabled = true; btn.textContent = '공지 처리 중...';
+  try{
+    const missing = p.retailers.filter(r => !r.retailer_id);
+    if(missing.length) throw new Error('포털에 등록되지 않은 리테일러: ' + missing.map(r=>r.code).join(', '));
+    const issueDate = od.issueDate || document.getElementById('odIssueDate')?.value || new Date().toISOString().slice(0,10);
+
+    for(const r of p.retailers){
+      const jg = Math.round(r.amount * P.JG_RATIO);
+      const { data: existing } = await sb.from('claims')
+        .select('id').eq('round_id', round.id).eq('retailer_id', r.retailer_id).is('workshop_id', null).maybeSingle();
+      const payload = {
+        round_id: round.id, retailer_id: r.retailer_id, workshop_id: null,
+        status: 'SUBMITTED', approved_amount: r.amount,
+        jg_amount: jg, lr_amount: r.amount - jg,
+        detail: {
+          preset: 'ONE_DMS_AR', user_count: r.users.length, user_months: r.user_months,
+          rate: p.rate, fiscal_year: p.fiscalYear, month_labels: p.monthLabels,
+          amount: r.amount, vat: Math.round(r.amount * P.VAT_RATE), users: r.users
+        },
+        confirmed_at: null, submitted_at: new Date().toISOString()
+      };
+      const { error } = existing
+        ? await sb.from('claims').update(payload).eq('id', existing.id)
+        : await sb.from('claims').insert(payload);
+      if(error) throw error;
+    }
+
+    const summary = {
+      preset:'ONE_DMS_AR', computed_at:new Date().toISOString(),
+      fiscal_year:p.fiscalYear, rate:p.rate, month_labels:p.monthLabels, grand:p.grand,
+      retailers:p.retailers.map(r => ({ code:r.code, retailer_id:r.retailer_id, user_count:r.users.length, user_months:r.user_months, amount:r.amount })),
+      excluded:p.excluded, unmatched:p.unmatched
+    };
+    const { error: rErr } = await sb.from('rounds')
+      .update({ status:'PUBLISHED', source_summary:summary, invoice_issue_date:issueDate, fiscal_year:p.fiscalYear })
+      .eq('id', round.id);
+    if(rErr) throw rErr;
+    await logAudit('AR_PUBLISH','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, retailers:p.retailers.length, total:p.grand.total});
+    try{
+      const { data: rts } = await sb.from('retailers').select('id, email, name').in('id', p.retailers.map(r => r.retailer_id));
+      for(const rt of (rts||[])){
+        const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+        if(!to.length) continue;
+        await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 청구 내역 확인 요청`,
+          `<p>${rt.name} 담당자님,</p><p>${type.name} (${round.period_label}) 청구 내역이 공지되었습니다. 포털에서 대상 인원과 청구금액을 확인하시고 [정산 확정] 버튼을 눌러주세요.</p>`);
+      }
+    }catch(e){ console.warn('[알림]', e); }
+    await renderRoundDetail();
+  }catch(err){
+    console.error(err); alert('공지 실패: ' + (err.message || err));
+    btn.disabled = false; btn.textContent = '리테일러에 청구 공지';
+  }
+}
+
+async function finalizeOneDmsRound(round, type){
+  if(!confirm('최종 확정하면 리테일러는 더 이상 확인 상태를 바꿀 수 없습니다. 계속할까요?')) return;
+  const { error } = await sb.from('rounds').update({ status:'FINALIZED' }).eq('id', round.id);
+  if(error){ alert('확정 실패: ' + error.message); return; }
+  await logAudit('AR_FINALIZE','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
+  await renderRoundDetail();
+}
+
+// One DMS AR 바우처 — 대표지점 코드는 ONE_DMS.REP_BRANCH 사용 (기존 workshops.customer_code 와 다름)
+async function generateOneDmsVoucher(round, type, claims){
+  const progressEl = document.getElementById('ar_voucher_progress');
+  const setProgress = (m) => { if(progressEl) progressEl.innerHTML = m; };
+  const P = oneDmsParams(type);
+  try{
+    setProgress('템플릿을 불러오는 중...');
+    const { data: signed, error: sErr } = await sb.storage.from('settlements').createSignedUrl(type.voucher_template_path, 60);
+    if(sErr || !signed) throw new Error('템플릿을 불러오지 못했습니다: ' + (sErr?.message||''));
+    const tplBuffer = await (await fetch(signed.signedUrl)).arrayBuffer();
+
+    const readWb = XLSX.read(tplBuffer, { type:'array' });
+    const inputSheetName = readWb.SheetNames.find(n => /AR_input\s*reque?st/i.test(n));
+    const coverSheetName = readWb.SheetNames.find(n => /AR without PO/i.test(n));
+    if(!inputSheetName) throw new Error("템플릿에서 'AR_input reqeust' 시트를 찾지 못했습니다.");
+
+    const readInput = readWb.Sheets[inputSheetName];
+    const custRowMap = new Map();
+    for(let r = 5; r <= 60; r++){
+      const cell = readInput['D'+r];
+      if(cell && cell.v) custRowMap.set(String(cell.v).trim(), r);
+    }
+
+    setProgress('금액을 배치하는 중...');
+    const inputCells = {};
+    const unmatched = [];
+    for(const c of (claims||[])){
+      const amount = Number(c.approved_amount||0);
+      if(!amount) continue;
+      const code = c.retailers?.code;
+      const rep = P.REP_BRANCH[code];
+      if(!rep){ unmatched.push(code || c.retailer_id); continue; }
+      const rowNum = custRowMap.get(String(rep.customer_code).trim());
+      if(!rowNum){ unmatched.push(`${code}(${rep.customer_code})`); continue; }
+      const jg = c.jg_amount != null ? Number(c.jg_amount) : Math.round(amount * P.JG_RATIO);
+      const lr = c.lr_amount != null ? Number(c.lr_amount) : amount - jg;
+      inputCells[`I${rowNum}`] = amount;
+      inputCells[`J${rowNum}`] = Math.round(amount * P.VAT_RATE);
+      inputCells[`M${rowNum}`] = jg;
+      inputCells[`N${rowNum}`] = lr;
+    }
+    if(Object.keys(inputCells).length === 0) throw new Error('배치할 금액이 없습니다. 템플릿 D열 customer code 와 대표지점 코드가 맞는지 확인하세요.');
+
+    const vLine = type.voucher_lines?.[0] || {};
+    const issueDate = round.invoice_issue_date
+      ? (() => { const [y,m,d] = round.invoice_issue_date.split('-').map(Number); return new Date(Date.UTC(y,m-1,d)); })()
+      : (() => { const n = new Date(); return new Date(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())); })();
+    const coverCells = {
+      'E21': { value: dateToExcelSerial(issueDate) },
+      'N39': { value: `${round.period_label} ${vLine.description || type.name}`.trim(), isString: true }
+    };
+
+    setProgress('바우처 파일을 만드는 중...');
+    const buffer = await buildVoucherFromTemplate(tplBuffer, { inputCells, coverCells, images: [], inputSheetName, coverSheetName });
+    const fname = `AR Voucher_${sanitizeFilename(round.period_label)}_${sanitizeFilename(vLine.description || type.code || 'One DMS')}.xlsx`;
+    const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+
+    const { data: { user } } = await sb.auth.getUser();
+    await sb.from('vouchers').insert({ round_id: round.id, retailer_id: null, generated_by: user?.id || null });
+    if(round.status !== 'VOUCHERED') await sb.from('rounds').update({ status:'VOUCHERED' }).eq('id', round.id);
+    await logAudit('AR_VOUCHER_GENERATE','ROUND',round.id,{label:round.period_label});
+    setProgress(`완료 — ${fname} 다운로드됨.`
+      + (unmatched.length ? `<br><span style="color:var(--accent-ar);">미배치: ${unmatched.join(', ')}</span>` : '')
+      + '<br>표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하세요.');
+  }catch(e){
+    console.error(e); setProgress('<span style="color:var(--danger);">생성 실패: ' + e.message + '</span>');
+  }
+}
+
+/* ---------- 리테일러 화면: One DMS 청구내역 확인 카드 (라이선스 종류 비공개) ---------- */
+async function renderOneDmsRetailerCard(listEl, round, items){
+  const c = items[0];
+  const d = c.detail || {};
+  const won = (n) => fmtWon(Math.round(n||0));
+  const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
+  const months = d.month_labels || [];
+  const card = document.createElement('div');
+  card.className = 'claim-card';
+
+  const userRows = (d.users||[]).map(u => `
+    <tr>
+      <td>${u.name||''}</td><td class="muted">${u.login||''}</td><td>${u.role||''}</td>
+      <td class="muted">${u.first||''}</td><td>${u.status||''}</td><td class="muted">${u.retire||''}</td>
+      ${(u.flags||[]).map(f => `<td style="text-align:center;">${f?'O':'·'}</td>`).join('')}
+      <td style="text-align:right;">${u.months_active||0}</td>
+    </tr>`).join('');
+
+  card.innerHTML = `
+    <div class="claim-head">
+      <div>
+        <div class="claim-name">${round.settlement_types?.name||''} · ${round.period_label}</div>
+        <div class="claim-sub">JLR Korea 청구 · 대상 인원 확인 후 확정
+          · <span class="badge ${round.status==='PUBLISHED'?'badge-ap':'badge-off'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span></div>
+      </div>
+      ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
+    </div>
+    <div class="hint" style="margin:8px 0;">아래 인원이 해당 기간(${months.join(' / ')}) 동안 One DMS를 사용하여 청구됩니다. (${d.user_count||(d.users||[]).length}명 · ${d.user_months||0} 유저-month)</div>
+    <div style="overflow-x:auto;">
+    <table style="min-width:640px;">
+      <thead><tr><th>이름</th><th>로그인 ID</th><th>역할</th><th>첫 로그인</th><th>재직상태</th><th>퇴직일</th>${months.map(m=>`<th style="text-align:center;">${m}</th>`).join('')}<th style="text-align:right;">사용 개월</th></tr></thead>
+      <tbody>${userRows}</tbody>
+    </table>
+    </div>
+    <table style="margin-top:10px; max-width:340px;">
+      <tbody>
+        <tr><td>공급가액</td><td style="text-align:right;">${won(d.amount)}</td></tr>
+        <tr><td>부가세 (10%)</td><td style="text-align:right;">${won(d.vat)}</td></tr>
+        <tr style="font-weight:600;"><td>합계</td><td style="text-align:right;color:var(--accent-ap);">${won((d.amount||0)+(d.vat||0))}</td></tr>
+      </tbody>
+    </table>
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button class="btn btn-sm btn-ghost od-xlsx-btn">엑셀 다운로드</button>
+      ${canConfirm ? '<button class="btn btn-sm od-confirm-btn">정산 확정</button>' : ''}
+    </div>`;
+
+  card.querySelector('.od-xlsx-btn').addEventListener('click', () => downloadOneDmsRetailerXlsx(c, round));
+  const cb = card.querySelector('.od-confirm-btn');
+  if(cb){
+    cb.addEventListener('click', async () => {
+      if(!confirm(`청구금액 ${won((d.amount||0)+(d.vat||0))} (VAT 포함) 을(를) 확정할까요? 확정 후에는 취소할 수 없습니다.`)) return;
+      const { error } = await sb.from('claims').update({ confirmed_at: new Date().toISOString() }).eq('id', c.id);
+      if(error){ alert('처리 실패: ' + error.message); return; }
+      await loadRetailerClaims();
+    });
+  }
+  listEl.appendChild(card);
+}
+
+// 리테일러 다운로드용 xlsx — 라이선스 종류·단가 없음. "이 인원들이 이 기간에 있어서 이렇게 청구됨"만.
+function downloadOneDmsRetailerXlsx(claim, round){
+  const d = claim.detail || {};
+  const months = d.month_labels || [];
+  const header = ['이름','로그인 아이디','역할','첫 로그인 일자','재직상태','퇴직일', ...months, '사용 개월수'];
+  const dataRows = (d.users||[]).map(u => [
+    u.name||'', u.login||'', u.role||'', u.first||'', u.status||'', u.retire||'',
+    ...((u.flags||[]).map(f => f ? 'O' : '')), u.months_active||0
+  ]);
+  const pad = months.map(()=>'');
+  const aoa = [
+    [`${round.settlement_types?.name||'One DMS License Fee'} — ${round.period_label}`],
+    [`대상 인원 ${d.user_count||(d.users||[]).length}명 · ${d.user_months||0} 유저-month · 집계월 ${months.join(' / ')}`],
+    [],
+    header,
+    ...dataRows,
+    [],
+    ['합계 (유저-month)','','','','','', ...pad, d.user_months||0],
+    ['공급가액', d.amount||0],
+    ['부가세 (10%)', d.vat||0],
+    ['합계 (VAT 포함)', (d.amount||0)+(d.vat||0)]
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '청구내역');
+  const fname = `${sanitizeFilename(round.settlement_types?.name||'One DMS')}_${sanitizeFilename(round.period_label)}.xlsx`;
+  const out = XLSX.write(wb, { bookType:'xlsx', type:'array' });
+  const blob = new Blob([out], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+/* ================================================================
    Engine Oil 3V — 바우처 3종 생성 (3단계)
    저장된 템플릿 3개 + 확정 내역(source_summary) → xlsx 3개 + rawdata 통합 → ZIP
    템플릿은 Storage: voucher-templates/eo3v-{saveback|support|incentive}.xlsx
@@ -3571,6 +4115,8 @@ async function renderRoundDetail(){
   if(error || !round){ alert('회차를 불러오지 못했습니다.'); switchView('rounds'); return; }
   const type = round.settlement_types;
 
+  // One DMS License Fee (AR · 시스템 산출 · 로우데이터 업로드 → 자동 산출)
+  if(type.source_config?.preset === 'ONE_DMS_AR'){ return renderOneDmsRoundDetail(round, type); }
   // AR(JLRK → 리테일러 청구)은 흐름이 반대라 별도 화면으로 분기
   if(type.direction === 'AR'){ return renderARRoundDetail(round, type); }
   // Engine Oil 3종 바우처 (AP · 시스템 산출 · 리테일러 입력 없음)
@@ -5495,6 +6041,11 @@ async function loadRetailerClaims(){
   for(const items of groups.values()){
     const round = items[0].rounds;
 
+    // One DMS License Fee (AR · 시스템 산출) — 인원 확인 카드 (라이선스 종류 비공개)
+    if(round.settlement_types?.source_config?.preset === 'ONE_DMS_AR'){
+      await renderOneDmsRetailerCard(listEl, round, items);
+      continue;
+    }
     // Engine Oil 3종 (AP · 시스템 산출) — 확인 전용 카드
     if(round.settlement_types?.source_config?.preset === 'ENGINE_OIL_3V'){
       await renderEngineOilRetailerCard(listEl, round, items);

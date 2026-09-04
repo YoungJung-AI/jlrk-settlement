@@ -142,7 +142,22 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
   리테일러별 수량 입력 → `수량 × unit_price` 자동계산(읽기전용) → `saveARClaim`이 `claims.quantity` 저장.
   `charge_unit='PRIMARY'`면 `generateARVoucher`가 대표지점(`workshops.is_primary` + `customer_code`)에 금액 몰빵,
   `brand_jg_ratio` 고정배분 + `vat_code` 적용. 설정폼에 `amount_mode=UNIT`/단가/계상단위 필드 존재.
-  - ⚠️ One DMS License 실데이터로 E2E 검증은 사용자 몫. (예 단가 `109329.6667`, VAT `A1:10%`, JG/LR 고정 10:90)
+  (단순 수량×단가 유형용. One DMS 는 아래 별도 프리셋으로 처리.)
+- [x] **One DMS License Fee (`source_config.preset='ONE_DMS_AR'`, SYSTEM + 방향 AR) — 1차 완료 (2026-09-04).**
+  관리자가 라이선스 로우데이터(1인 1행, 월별 라이선스 종류 칸) 업로드 → 리테일러별 **활성 유저-month**
+  (그 달 라이선스 칸 비어있지 않으면 카운트, 분기=앞 3개 월컬럼) 집계 → `Σ유저-month × FY 유저당 월단가`.
+  FY 단가맵: `ONE_DMS.FY_RATES` (FY26/27=109,329.6667 등) + `source_config.fy_rates` 오버라이드,
+  회차 `fiscal_year`로 자동선택(`FY27`↔`FY26/27` 변환).
+  제외: JLRK 본사·브리티시(폐업). VAT 10%, JG:LR 10:90 고정, GL 605030101.
+  흐름: DRAFT(업로드·미리보기·공지) → PUBLISHED(리테일러 확인) → FINALIZED → VOUCHERED.
+  리테일러 카드/엑셀 다운로드는 **라이선스 종류·단가 미표시** — 유저 명단(이름/ID/역할/첫로그인/재직/퇴직/월별 O·X/사용개월) + 금액만.
+  AR 바우처: `ONE_DMS.REP_BRANCH` 대표지점 코드 사용 — ⚠️ 기존 AR 마스터(019)와 CH/HS/HY 코드 다름
+  (사용자 확인: One DMS 바우처 코드 KR01048/KR01030/KR01120 사용, 019 값은 안 건드림).
+  함수: `parseOneDmsRaw` / `renderOneDmsRoundDetail` / `publishOneDmsRound` / `finalizeOneDmsRound` /
+  `generateOneDmsVoucher` / `renderOneDmsRetailerCard` / `downloadOneDmsRetailerXlsx`. DB 스키마 변경 없음.
+  - ⚠️ 실데이터 E2E: 파서 로직은 사용자 제공 파일의 `집계` 피벗과 8개사 전부 일치 확인. 실제 회차로 업로드→바우처까지 1회 검증 필요.
+  - 유형 생성 시: `amount_mode=SYSTEM`, `direction=AR`, `source_config={"preset":"ONE_DMS_AR"}`, AR 바우처 템플릿 업로드,
+    `voucher_lines[0].description`(예: One DMS License Fee), 회차에 `fiscal_year` 세팅.
 - [ ] **검증 규칙 엔진** — 사용자가 엑셀로 눈으로 하던 검증을 포털 안에서 자동 실행. 설계만 끝남(`docs/history.md` 3805~3976).
   - 핵심 원칙: **AI는 규칙을 "만들 때만" 사용**, 실제 검증(라인 수천 건)은 결정론적 계산 로직으로 매번 실행.
   - 규칙 JSON 타입: `FORMULA`(계산식 재검증), `RANGE`, `DUPLICATE`(dedup keys), `DATE_RANGE`(기간 이탈),
