@@ -123,11 +123,15 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
   전부 실주소. AJ·KCC 는 담당자 2명이라 쉼표 구분 저장(`splitEmails()` 로 다중 발송).
   담당자 로그인 계정 10개도 `manage-user` 로 생성함(초기비번 강제변경). 기존 테스트계정
   `chtest@chunilauto.co.kr` / `youngjung.yu@gmail.com` 은 아직 active — 불필요 시 비활성화.
-- [x] **Engine Oil Package 클레임 기반 정산 (`amount_mode='SYSTEM'` + `source_config.preset='ENGINE_OIL_3V'`, AP) — 1차 완료.**
-  구현됨: `parseEngineOilCoupon`/`parseEngineOilSales`(원본 2종 파싱) → `eo3vBuildBreakdown`(3종 계산) →
-  DRAFT→PUBLISHED→CONFIRMED→VOUCHERED 상태머신(`renderEngineOilRoundDetail`) → 리테일러 [정산 확정] 카드
-  (`renderEngineOilRetailerCard`) → 확정 시 `settled_records` 기록(`finalizeEngineOilRound`) →
-  바우처 3종 생성(`generateEngineOilVouchers`, JSZip XML 치환, JG/LR 라인 교정) + 템플릿 업로드 + rawdata ZIP.
+- [x] **Engine Oil Package AP 정산 — 2개 프리셋으로 분리 (2026-09-04).**
+  · `ENGINE_OIL_RS` (월 단위): 사용반환금 + Retailer Support. CouponClaim 1개 업로드 → 바우처 **2개 개별 다운로드**
+    (`Engine Oil Package_사용반환금_*.xlsx` / `_Retailer Support_*.xlsx`). dedup: 차대번호+참조번호+쿠폰번호.
+  · `ENGINE_OIL_SI` (분기 단위): Sales Incentive. 쿠폰북정산내역 업로드 → 바우처 1개. (판매−환불)×10,000, 표지 90:10.
+    dedup: **차대번호+쿠폰북ID+유형** (쿠폰북ID는 판매/환불 쌍이 공유 → 유형 필수).
+  공통: `eoPreset(type)`가 comps/src를 결정, `parseEngineOilCoupon`/`parseEngineOilSales`(async, dedup 추가) 재사용,
+  `renderEngineOilRoundDetail`/`renderEngineOilSection`/`renderEngineOilPreview`/`generateEngineOilVouchers`/
+  `renderEngineOilRetailerCard`가 프리셋별 분기. 리테일러 확인은 회차당 1번. `ENGINE_OIL_3V`는 하위호환용으로 남김.
+  바우처 템플릿 3개(`voucher-templates/eo3v-{saveback|support|incentive}.xlsx`)는 회차 바우처 생성 화면에서 업로드.
   산출 상수(사용반환금 비율 0.8 / Castrol 21,000 / 인센티브 10,000)는 정산유형 설정폼의
   "시스템 산출 상수" 3필드 → `source_config`(키: `customer_rate`/`castrol_per`/`incentive_unit`),
   비우면 `EO3V` 기본값(`eo3vParams()`).

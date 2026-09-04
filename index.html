@@ -550,7 +550,7 @@
     <div class="field"><label>원천 엑셀 파싱 규칙 (JSON)</label>
       <textarea id="f_source_config" rows="3" placeholder='{"sheet":"FY27 Q1 Jun","workshop_col":"Workshop","amount_col":"Total","jg_col":"Jaguar","lr_col":"Landrover"}'></textarea>
     </div>
-    <div class="hint">업로드/시스템 산출 방식일 때, 원천 엑셀에서 어느 시트·어느 컬럼을 읽을지 지정합니다. 프리셋(<code>ENGINE_OIL_3V</code> · <code>ONE_DMS_AR</code>)은 개발된 로직이 적용됩니다.</div>
+    <div class="hint">업로드/시스템 산출 방식일 때, 원천 엑셀에서 어느 시트·어느 컬럼을 읽을지 지정합니다. 프리셋(<code>ENGINE_OIL_RS</code> · <code>ENGINE_OIL_SI</code> · <code>ONE_DMS_AR</code>)은 개발된 로직이 적용됩니다.</div>
     </div>
 
     <div id="grp_eo_consts">
@@ -1436,7 +1436,7 @@ function syncTypeFormFields(){
   const dir = document.getElementById('f_direction').value;
   const mode = document.getElementById('f_amount_mode').value;
   const raw = document.getElementById('f_source_config').value || '';
-  const isEngineOil = /ENGINE_OIL_3V/.test(raw);
+  const isEngineOil = /ENGINE_OIL_(3V|RS|SI)/.test(raw);
   const show = (id, on) => { const el = document.getElementById(id); if(el) el.style.display = on ? '' : 'none'; };
   show('grp_ar_struct',     dir === 'AR');
   show('grp_unit_price',    mode === 'UNIT');
@@ -1833,14 +1833,48 @@ async function parseEngineOilCoupon(buf, type){
 }
 
 // ── 쿠폰북정산내역 원본 → 지점별 인센티브 (판매 − 환불) × 단가 ──
-function parseEngineOilSales(buf){
+// Engine Oil AP 프리셋 — 어떤 바우처 성분/원본/주기인지
+//   ENGINE_OIL_RS : 사용반환금 + Retailer Support (월단위, CouponClaim, 바우처 2개)
+//   ENGINE_OIL_SI : Sales Incentive (분기단위, 쿠폰북정산내역, 바우처 1개)
+//   ENGINE_OIL_3V : (구) 3종 한꺼번에 — 하위호환
+function eoPreset(type){
+  const p = type?.source_config?.preset;
+  if(p === 'ENGINE_OIL_RS') return { key:'RS', comps:['saveback','support'], src:'coupon', label:'사용반환금 / Retailer Support' };
+  if(p === 'ENGINE_OIL_SI') return { key:'SI', comps:['incentive'], src:'sales', label:'Sales Incentive' };
+  if(p === 'ENGINE_OIL_3V') return { key:'3V', comps:['saveback','support','incentive'], src:'both', label:'3종' };
+  return null;
+}
+const isEnginePreset = (type) => !!eoPreset(type);
+
+// ── 쿠폰북정산내역 원본 → 지점별 인센티브 (판매 − 환불) + dedup(차대번호+쿠폰북ID) ──
+async function parseEngineOilSales(buf, type){
   const wb = XLSX.read(buf, { type:'array', cellDates:true });
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'' });
   const hdr = eo3vFindHeader(rows, ['유형','지점명']);
   if(!hdr) throw new Error('쿠폰북 정산내역 원본에서 헤더(유형·지점명)를 찾지 못했습니다.');
   const iType = hdr.map['유형'], iSite = hdr.map['지점명'];
+  const iVin  = hdr.map['차대번호'];
+  const iCbid = hdr.map['쿠폰북ID'] ?? hdr.map['쿠폰북 ID'];
+  const iPrice = hdr.map['가격 (VAT)'] ?? hdr.map['가격(VAT)'] ?? hdr.map['가격'];
+
+  // 기정산 지문 (type 있을 때만)
+  const known = new Set();
+  if(type?.id){
+    for(let from=0;;from+=1000){
+      const { data, error } = await sb.from('settled_records')
+        .select('dedup_hash').eq('type_id', type.id).range(from, from+999);
+      if(error) throw new Error('기정산 이력 조회 실패: ' + error.message);
+      (data||[]).forEach(r => known.add(r.dedup_hash));
+      if(!data || data.length < 1000) break;
+    }
+  }
+
   const byWs = new Map();     // code → { sale, refund }
   const unmatched = new Map();
+  const targetHashes = [];
+  const seen = new Set();
+  let nDup = 0, nAlready = 0;
+
   for(let i=hdr.headerRow+1; i<rows.length; i++){
     const row = rows[i];
     if(!row || row.every(v => v === '' || v == null)) continue;
@@ -1848,60 +1882,81 @@ function parseEngineOilSales(buf){
     const code = EO3V.WS_MAP[site];
     if(!code){ if(site) unmatched.set(site, (unmatched.get(site)||0)+1); continue; }
     const t = String(row[iType] ?? '').trim();
+    if(t !== '판매' && t !== '환불') continue; // 반품 등 제외 (사용자 확인 2026-08-31)
+
+    // dedup: 차대번호 + 쿠폰북ID + 유형
+    //   ★ 쿠폰북ID는 판매/환불 쌍이 같은 값을 공유하므로 유형까지 포함해야 판매·환불이 각각 카운트됨
+    const vin = iVin  !== undefined ? String(row[iVin]  ?? '') : '';
+    const cb  = iCbid !== undefined ? String(row[iCbid] ?? '') : '';
+    const hash = (vin + cb + t).replace(/\s+/g,'').toUpperCase();
+    if(hash){
+      if(seen.has(hash)){ nDup++; continue; }
+      seen.add(hash);
+      if(known.has(hash)){ nAlready++; continue; }
+    }
+
     let g = byWs.get(code);
     if(!g){ g = { sale:0, refund:0 }; byWs.set(code, g); }
-    if(t === '판매') g.sale++;
-    else if(t === '환불') g.refund++;
-    // 반품은 인센티브 대상 아님 (사용자 확인 2026-08-31)
+    if(t === '판매') g.sale++; else g.refund++;
+    if(hash){
+      const amt = iPrice !== undefined ? (Number(String(row[iPrice]).replace(/,/g,'')) || 0) : 0;
+      targetHashes.push({ hash, code, keys:[vin, cb, t], amount: amt });
+    }
   }
-  return { byWs, unmatched };
+  return { byWs, unmatched, targetHashes, nDup, nAlready, nTarget: targetHashes.length };
 }
 
-// ── 3종 바우처 미리보기 렌더 ──
+// ── 원본 업로드 + 미리보기 (프리셋별) ──
 async function renderEngineOilSection(round, type, claims){
+  const eo = eoPreset(type);
   const host = document.getElementById('reviewSection');
   const card = document.createElement('div');
   card.className = 'info-card';
+  const wantCoupon = eo.src === 'coupon' || eo.src === 'both';
+  const wantSales  = eo.src === 'sales'  || eo.src === 'both';
   card.innerHTML = `
-    <div class="section-label" style="margin-top:0;">원본 업로드 — 바우처 3종 (시스템 산출)</div>
+    <div class="section-label" style="margin-top:0;">원본 업로드 — ${eo.label} (시스템 산출)</div>
     <div class="hint">
-      리테일러 입력이 없는 유형입니다. 관리자가 원본 2개를 올리면 시스템이
-      <b>사용반환금 / Retailer Support / Sales Incentive</b> 3종을 계산합니다.<br>
-      쿠폰 클레임: <b>클레임상태=전송</b> AND 아직 정산되지 않은 건만. 중복키: 차대번호+참조번호+쿠폰번호.
+      리테일러 입력이 없는 유형입니다. 관리자가 원본을 올리면 시스템이 자동 계산합니다.<br>
+      ${wantCoupon ? '쿠폰 클레임: <b>클레임상태=전송</b> AND 아직 정산되지 않은 건만. 중복키: 차대번호+참조번호+쿠폰번호.<br>' : ''}
+      ${wantSales ? '쿠폰북 정산내역: 유형=판매/환불만. 중복키: 차대번호+쿠폰북ID.' : ''}
     </div>
     <div class="row2" style="max-width:620px; margin-top:12px;">
-      <div class="field"><label>① 쿠폰 클레임 원본 (CouponClaim 현황)</label>
-        <input type="file" id="eoCoupon" accept=".xlsx,.xls"></div>
-      <div class="field"><label>② 쿠폰북 정산내역 원본 (Sales Incentive용)</label>
-        <input type="file" id="eoSales" accept=".xlsx,.xls"></div>
+      ${wantCoupon ? `<div class="field"><label>쿠폰 클레임 원본 (CouponClaim 현황)</label>
+        <input type="file" id="eoCoupon" accept=".xlsx,.xls"></div>` : ''}
+      ${wantSales ? `<div class="field"><label>쿠폰북 정산내역 원본</label>
+        <input type="file" id="eoSales" accept=".xlsx,.xls"></div>` : ''}
     </div>
-    <div class="hint">② 없이 ①만 올리면 사용반환금·Retailer Support만 미리보기됩니다.</div>
     <div id="eoResult"></div>`;
   host.appendChild(card);
 
   const run = async () => {
-    const cf = document.getElementById('eoCoupon').files[0];
-    const sf = document.getElementById('eoSales').files[0];
-    if(!cf) return;
+    const cf = wantCoupon ? document.getElementById('eoCoupon')?.files[0] : null;
+    const sf = wantSales  ? document.getElementById('eoSales')?.files[0]  : null;
+    if(wantCoupon && !cf) return;
+    if(!wantCoupon && wantSales && !sf) return;
     const out = document.getElementById('eoResult');
     out.innerHTML = '<div class="hint">분석 중...</div>';
     try{
-      const coupon = await parseEngineOilCoupon(await cf.arrayBuffer(), type);
-      const sales = sf ? parseEngineOilSales(await sf.arrayBuffer()) : null;
-      window.__eo3v = { coupon, sales, round_id: round.id };
+      const coupon = cf ? await parseEngineOilCoupon(await cf.arrayBuffer(), type) : null;
+      const sales  = sf ? await parseEngineOilSales(await sf.arrayBuffer(), type) : null;
+      window.__eo3v = { coupon, sales, round_id: round.id, preset: eo.key };
       out.innerHTML = renderEngineOilPreview(coupon, sales, type);
     } catch(err){
       console.error(err);
       out.innerHTML = `<div class="hint" style="color:var(--danger);">${err.message}</div>`;
     }
   };
-  document.getElementById('eoCoupon').addEventListener('change', run);
-  document.getElementById('eoSales').addEventListener('change', run);
+  document.getElementById('eoCoupon')?.addEventListener('change', run);
+  document.getElementById('eoSales')?.addEventListener('change', run);
 }
 
 function renderEngineOilPreview(coupon, sales, type){
   const P = eo3vParams(type);
-  const codes = Array.from(coupon.byWs.keys()).sort();
+  const eo = eoPreset(type) || { comps:['saveback','support','incentive'] };
+  const showRS = eo.comps.includes('saveback') || eo.comps.includes('support');
+  const showSI = eo.comps.includes('incentive');
+  const codes = coupon ? Array.from(coupon.byWs.keys()).sort() : [];
   const won = (n) => fmtWon(Math.round(n));
   let tCust=0, tVme=0, tCast=0;
 
@@ -1945,14 +2000,13 @@ function renderEngineOilPreview(coupon, sales, type){
   const unmatchedHtml = (m, label) => m && m.size
     ? `<div class="hint" style="color:var(--accent-ar); margin-top:6px;">⚠️ ${label} 미매칭 지점: ${Array.from(m.entries()).map(([k,v])=>`${k}(${v})`).join(', ')}</div>` : '';
 
-  return `
+  const rsBlock = (showRS && coupon) ? `
     <div class="stat-row" style="margin-top:14px;">
       <div class="stat-card" style="flex:1;"><div class="stat-num" style="color:var(--accent);">${coupon.nTarget}</div><div class="stat-label">정산 대상 건</div></div>
       <div class="stat-card" style="flex:1;"><div class="stat-num" style="color:var(--text-dim);">${coupon.nExcluded}</div><div class="stat-label">미전송 제외</div></div>
       ${coupon.nDup?`<div class="stat-card" style="flex:1;"><div class="stat-num" style="color:var(--danger);">${coupon.nDup}</div><div class="stat-label">파일 내 중복</div></div>`:''}
     </div>
     ${unmatchedHtml(coupon.unmatched, '쿠폰 클레임')}
-    ${sales?unmatchedHtml(sales.unmatched, '쿠폰북 정산내역'):''}
 
     <div class="section-label">① 사용반환금 · GL 702030000 · VAT 0%</div>
     <table><thead><tr><th>지점</th><th style="text-align:right;">JG(고객)</th><th style="text-align:right;">LR(고객)</th><th style="text-align:right;">합계</th></tr></thead>
@@ -1967,24 +2021,22 @@ function renderEngineOilPreview(coupon, sales, type){
       <tfoot><tr style="font-weight:600;"><td>합계</td><td style="text-align:right;">${won(jgVme)}</td><td style="text-align:right;">${won(lrVme)}</td>
         <td style="text-align:right;">${won(jgCast)}</td><td style="text-align:right;">${won(lrCast)}</td><td style="text-align:right;">${won(tVme+tCast)}</td></tr></tfoot>
     </table>
+    <div class="hint">검증: 고객(${won(tCust)}) + VME(${won(tVme)}) + Castrol(${won(tCast)}) = <b>${won(tCust+tVme+tCast)}</b> (쿠폰 고객 80% + KR 20%)</div>
+  ` : '';
 
-    ${sales ? `
+  const siBlock = (showSI && sales) ? `
+    ${unmatchedHtml(sales.unmatched, '쿠폰북 정산내역')}
+    ${(sales.nDup||sales.nAlready)?`<div class="hint" style="margin-top:6px;">파일 내 중복 ${sales.nDup} · 기정산 제외 ${sales.nAlready} · 정산대상 ${sales.nTarget}</div>`:''}
     <div class="section-label">③ Sales Incentive · GL 700050800 · VAT 0% · 최종판매 × ${P.INCENTIVE_UNIT.toLocaleString('ko-KR')}원 · 고정 JG 10 : LR 90</div>
     <table><thead><tr><th>지점</th><th style="text-align:right;">판매</th><th style="text-align:right;">환불</th><th style="text-align:right;">최종판매</th><th style="text-align:right;">금액</th></tr></thead>
       <tbody>${r3}</tbody>
       <tfoot><tr style="font-weight:600;"><td>합계</td><td></td><td></td><td style="text-align:right;">${incCnt}</td><td style="text-align:right;">${won(tInc)}</td></tr></tfoot>
     </table>
     <div class="hint">표지 배분: LR = ${won(Math.round(tInc*0.9))} / JG = ${won(tInc - Math.round(tInc*0.9))}</div>
-    ` : '<div class="hint" style="margin-top:10px;">② 쿠폰북 정산내역 원본을 올리면 Sales Incentive가 계산됩니다.</div>'}
+  ` : '';
 
-    <div class="info-card" style="margin-top:16px;">
-      <div class="section-label" style="margin-top:0;">검증</div>
-      <div class="hint">
-        고객(${won(tCust)}) + VME(${won(tVme)}) + Castrol(${won(tCast)}) = <b>${won(tCust+tVme+tCast)}</b>
-        &nbsp;→ 쿠폰 고객 80% + 쿠폰 KR 20% 구조.<br>
-        ※ 아래 [리테일러에 정산내역 공지]를 누르면 이 내역이 각 리테일러에게 전달됩니다.
-      </div>
-    </div>`;
+  return `${rsBlock}${siBlock}
+    <div class="hint" style="margin-top:12px;">※ [리테일러에 정산내역 공지]를 누르면 이 내역이 각 리테일러에게 전달됩니다.</div>`;
 }
 
 /* ================================================================
@@ -2017,7 +2069,7 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type){
   };
 
   // 쿠폰 클레임 (사용반환금 + Retailer Support)
-  coupon.byWs.forEach((g, code) => {
+  if(coupon) coupon.byWs.forEach((g, code) => {
     const w = findWs(code);
     if(!w){ unmatched.push(code); return; }
     const rt = ensureRt(w);
@@ -2053,8 +2105,8 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type){
     });
   }
 
-  // 지문 → settled_records
-  (coupon.targetHashes||[]).forEach(t => {
+  // 지문 → settled_records (쿠폰 클레임 또는 쿠폰북)
+  [...(coupon?.targetHashes||[]), ...(sales?.targetHashes||[])].forEach(t => {
     const w = findWs(t.code);
     settle.push({ h: t.hash, ws_id: w?.id || null, rt_id: w?.retailer_id || null, amt: t.amount });
   });
@@ -2075,11 +2127,12 @@ function eo3vBuildBreakdown(coupon, sales, allWs, type){
 }
 
 async function renderEngineOilRoundDetail(round, type){
+  const eo = eoPreset(type);
   document.getElementById('claimsTable').style.display = 'none';
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
   document.getElementById('rd_status').innerHTML =
     `<span class="badge ${round.status==='DRAFT'?'badge-off':'badge-ap'}">${ROUND_STATUS_LABEL[round.status]||round.status}</span>`;
-  document.getElementById('rd_meta').textContent = 'AP · 시스템 산출 (바우처 3종) · 리테일러 입력 없음';
+  document.getElementById('rd_meta').textContent = `AP · 시스템 산출 (${eo.label}) · 리테일러 입력 없음`;
   document.getElementById('rd_due').textContent = round.invoice_issue_date
     ? `세금계산서 발행일 ${round.invoice_issue_date}` : '발행일 미설정';
 
@@ -2107,10 +2160,11 @@ async function renderEngineOilRoundDetail(round, type){
     document.getElementById('eoPublishBtn').addEventListener('click', () => publishEngineOilRound(round, type));
     await renderEngineOilSection(round, type, claims);
     // 미리보기 계산이 끝나면 공지 버튼 활성화
+    const needKey = eo.src === 'sales' ? 'sales' : 'coupon';
     const obs = setInterval(() => {
       const btn = document.getElementById('eoPublishBtn');
       if(!btn){ clearInterval(obs); return; }
-      btn.disabled = !(window.__eo3v && window.__eo3v.round_id === round.id && window.__eo3v.coupon);
+      btn.disabled = !(window.__eo3v && window.__eo3v.round_id === round.id && window.__eo3v[needKey]);
     }, 800);
     return;
   }
@@ -2124,14 +2178,17 @@ async function renderEngineOilRoundDetail(round, type){
       <td style="text-align:right;">${fmtWon(c.approved_amount)}</td>
       <td>${c.confirmed_at ? `<span class="badge badge-ap">확정 ${fmtDate(c.confirmed_at)}</span>` : '<span class="badge badge-off">확인 대기</span>'}</td>
     </tr>`).join('');
+  const sumParts = [];
+  if(eo.comps.includes('saveback')) sumParts.push(`사용반환금 ${fmtWon(s.grand?.customer)}`);
+  if(eo.comps.includes('support'))  sumParts.push(`Retailer Support ${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))}`);
+  if(eo.comps.includes('incentive')) sumParts.push(`Sales Incentive ${fmtWon(s.grand?.incentive)}`);
   card.innerHTML = `
     <div class="section-label" style="margin-top:0;">리테일러 확정 현황 (${confirmed}/${total})</div>
     <table><thead><tr><th>리테일러</th><th style="text-align:right;">정산 합계</th><th>상태</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="hint" style="margin-top:8px;">
-      3종 합계 — 사용반환금 ${fmtWon(s.grand?.customer)} · Retailer Support ${fmtWon((s.grand?.vme||0)+(s.grand?.castrol||0))} · Sales Incentive ${fmtWon(s.grand?.incentive)}
-    </div>`;
+    <div class="hint" style="margin-top:8px;">${sumParts.join(' · ')}</div>`;
   document.getElementById('reviewSection').appendChild(card);
 
+  const vCount = eo.comps.length;
   const vs = document.getElementById('voucherSection');
   if(round.status === 'PUBLISHED'){
     const allDone = total > 0 && confirmed === total;
@@ -2141,7 +2198,7 @@ async function renderEngineOilRoundDetail(round, type){
     vs.appendChild(b);
   } else if(['CONFIRMED','VOUCHERED'].includes(round.status)){
     const b = document.createElement('button');
-    b.className = 'btn'; b.textContent = round.status === 'VOUCHERED' ? '바우처 3종 다시 생성' : '바우처 3종 생성 (ZIP)';
+    b.className = 'btn'; b.textContent = (round.status === 'VOUCHERED' ? '바우처 다시 생성' : '바우처 생성') + (vCount>1?` (${vCount}개 파일)`:'');
     b.addEventListener('click', () => generateEngineOilVouchers(round, type));
     vs.appendChild(b);
     const re = document.createElement('button');
@@ -2159,7 +2216,7 @@ async function renderEngineOilRoundDetail(round, type){
 
 async function publishEngineOilRound(round, type){
   const eo = window.__eo3v;
-  if(!eo || !eo.coupon){ alert('원본 미리보기가 아직 없습니다.'); return; }
+  if(!eo || !(eo.coupon || eo.sales)){ alert('원본 미리보기가 아직 없습니다.'); return; }
   const issueDate = document.getElementById('eoIssueDate')?.value || new Date().toISOString().slice(0,10);
   const btn = document.getElementById('eoPublishBtn');
   btn.disabled = true; btn.textContent = '공지 처리 중...';
@@ -2186,10 +2243,12 @@ async function publishEngineOilRound(round, type){
     }
 
     const summary = {
-      preset: 'ENGINE_OIL_3V', computed_at: new Date().toISOString(),
+      preset: type.source_config?.preset || 'ENGINE_OIL_3V', computed_at: new Date().toISOString(),
       invoice_issue_date: issueDate,
       grand: bd.grand, retailers: bd.retailers, settle: bd.settle,
-      counts: { target: eo.coupon.nTarget, excluded: eo.coupon.nExcluded, dup: eo.coupon.nDup }
+      counts: eo.coupon
+        ? { target: eo.coupon.nTarget, excluded: eo.coupon.nExcluded, dup: eo.coupon.nDup }
+        : { target: eo.sales?.nTarget||0, dup: eo.sales?.nDup||0, already: eo.sales?.nAlready||0 }
     };
     const { error: rErr } = await sb.from('rounds')
       .update({ status:'PUBLISHED', source_summary: summary, invoice_issue_date: issueDate }).eq('id', round.id);
@@ -2239,24 +2298,41 @@ async function finalizeEngineOilRound(round, type){
   }
 }
 
-/* ---------- 리테일러 화면: Engine Oil 3종 정산내역 확인 카드 ---------- */
+/* ---------- 리테일러 화면: Engine Oil 정산내역 확인 카드 (프리셋별 컬럼) ---------- */
 async function renderEngineOilRetailerCard(listEl, round, items){
   const c = items[0];
   const d = c.detail || {};
   const won = (n) => fmtWon(Math.round(n||0));
   const canConfirm = round.status === 'PUBLISHED' && !c.confirmed_at;
+  const eo = eoPreset(round.settlement_types) || { comps:['saveback','support','incentive'] };
+  const sRS = eo.comps.includes('saveback') || eo.comps.includes('support');
+  const sSI = eo.comps.includes('incentive');
   const card = document.createElement('div');
   card.className = 'claim-card';
+
+  const th = ['<th>지점</th>'];
+  if(sRS) th.push('<th style="text-align:right;">사용반환금</th>','<th style="text-align:right;">Retailer Support</th>');
+  if(sSI) th.push('<th style="text-align:right;">Sales Incentive</th>');
+  th.push('<th style="text-align:right;">합계</th>');
 
   const wsRows = (d.workshops||[]).map(w => {
     const cust = (w.jg?.customer||0)+(w.lr?.customer||0);
     const vme  = (w.jg?.vme||0)+(w.lr?.vme||0);
     const cast = (w.jg?.castrol||0)+(w.lr?.castrol||0);
     const inc  = w.incentive?.amount||0;
-    return `<tr><td>${w.code}</td><td style="text-align:right;">${won(cust)}</td>
-      <td style="text-align:right;">${won(vme+cast)}</td><td style="text-align:right;">${won(inc)}</td>
-      <td style="text-align:right;">${won(cust+vme+cast+inc)}</td></tr>`;
+    const rowTot = (sRS?(cust+vme+cast):0) + (sSI?inc:0);
+    const tds = [`<td>${w.code}</td>`];
+    if(sRS) tds.push(`<td style="text-align:right;">${won(cust)}</td>`,`<td style="text-align:right;">${won(vme+cast)}</td>`);
+    if(sSI) tds.push(`<td style="text-align:right;">${won(inc)}</td>`);
+    tds.push(`<td style="text-align:right;">${won(rowTot)}</td>`);
+    return `<tr>${tds.join('')}</tr>`;
   }).join('');
+
+  const grandTot = (sRS?((d.customer||0)+(d.vme||0)+(d.castrol||0)):0) + (sSI?(d.incentive||0):0);
+  const tf = ['<td>합계</td>'];
+  if(sRS) tf.push(`<td style="text-align:right;">${won(d.customer)}</td>`,`<td style="text-align:right;">${won((d.vme||0)+(d.castrol||0))}</td>`);
+  if(sSI) tf.push(`<td style="text-align:right;">${won(d.incentive)}</td>`);
+  tf.push(`<td style="text-align:right;color:var(--accent-ap);">${won(grandTot)}</td>`);
 
   card.innerHTML = `
     <div class="claim-head">
@@ -2267,15 +2343,12 @@ async function renderEngineOilRetailerCard(listEl, round, items){
       </div>
       ${c.confirmed_at ? '<span class="badge badge-ap">확정완료</span>' : '<span class="badge badge-off">확인 대기</span>'}
     </div>
-    <table style="margin-top:10px;">
-      <thead><tr><th>지점</th><th style="text-align:right;">사용반환금</th><th style="text-align:right;">Retailer Support</th><th style="text-align:right;">Sales Incentive</th><th style="text-align:right;">합계</th></tr></thead>
+    <div style="overflow-x:auto;"><table style="margin-top:10px;">
+      <thead><tr>${th.join('')}</tr></thead>
       <tbody>${wsRows}</tbody>
-      <tfoot><tr style="font-weight:600;"><td>합계</td>
-        <td style="text-align:right;">${won(d.customer)}</td>
-        <td style="text-align:right;">${won((d.vme||0)+(d.castrol||0))}</td>
-        <td style="text-align:right;">${won(d.incentive)}</td>
-        <td style="text-align:right;color:var(--accent-ap);">${won(d.total)}</td></tr></tfoot>
-    </table>`;
+      <tfoot><tr style="font-weight:600;">${tf.join('')}</tr></tfoot>
+    </table></div>`;
+  d.total = grandTot;
 
   if(canConfirm){
     const w = document.createElement('div');
@@ -2921,35 +2994,35 @@ async function eo3vFillTemplate(tplBuf, { inputFills, coverDate }){
 }
 
 async function generateEngineOilVouchers(round, type){
+  const eo = eoPreset(type);
   const vs = document.getElementById('voucherSection');
   const s = round.source_summary;
   if(!s || !s.retailers){ alert('확정 내역이 없습니다.'); return; }
 
-  // 템플릿 3개 확인
+  // 프리셋에 필요한 템플릿만 확인
+  const needTpl = eo.comps.slice();
   const missing = [];
   const bufs = {};
-  for(const [k, path] of Object.entries(EO3V_TPL)){
-    const { data, error } = await sb.storage.from('settlements').download(path);
+  for(const k of needTpl){
+    const { data, error } = await sb.storage.from('settlements').download(EO3V_TPL[k]);
     if(error || !data){ missing.push(k); } else { bufs[k] = await data.arrayBuffer(); }
   }
+  const TPL_LABEL = { saveback:'사용반환금', support:'Retailer Support', incentive:'Sales Incentive' };
   if(missing.length){
     let box = document.getElementById('eoTplBox');
-    if(!box){
-      box = document.createElement('div'); box.id = 'eoTplBox'; box.className = 'info-card';
-      vs.appendChild(box);
-    }
+    if(!box){ box = document.createElement('div'); box.id = 'eoTplBox'; box.className = 'info-card'; vs.appendChild(box); }
     box.innerHTML = `<div class="section-label" style="margin-top:0;">바우처 템플릿 업로드 필요</div>
-      <div class="hint">아래 3개를 올리면 이후 회차에서도 재사용됩니다.</div>
-      ${Object.keys(EO3V_TPL).map(k => `<div class="field" style="max-width:520px;">
-        <label>${{saveback:'① 사용반환금',support:'② Retailer Support',incentive:'③ Sales Incentive'}[k]} 템플릿 ${missing.includes(k)?'':'✔'}</label>
+      <div class="hint">아래 템플릿을 올리면 이후 회차에서도 재사용됩니다.</div>
+      ${needTpl.map(k => `<div class="field" style="max-width:520px;">
+        <label>${TPL_LABEL[k]} 템플릿 ${missing.includes(k)?'':'✔'}</label>
         <input type="file" accept=".xlsx" data-k="${k}"></div>`).join('')}`;
     box.querySelectorAll('input[type=file]').forEach(inp => {
       inp.addEventListener('change', async () => {
         const f = inp.files[0]; if(!f) return;
         const { error } = await sb.storage.from('settlements').upload(EO3V_TPL[inp.dataset.k], f, { upsert:true });
         if(error){ alert('업로드 실패: ' + error.message); return; }
-        inp.previousElementSibling; inp.disabled = true;
-        alert('업로드됨. 3개 모두 올린 뒤 다시 [바우처 3종 생성]을 눌러주세요.');
+        inp.disabled = true;
+        alert('업로드됨. 필요한 템플릿을 모두 올린 뒤 다시 [바우처 생성]을 눌러주세요.');
       });
     });
     return;
@@ -2969,24 +3042,20 @@ async function generateEngineOilVouchers(round, type){
         incentive: w.incentive?.amount || 0
       };
     }));
-
-    const out = new JSZip();
     const R = (n) => Math.round(n);
+    const per = sanitizeFilename(round.period_label);
 
-    // ① 사용반환금 — AP_input reqeust : M=JG customer, N=LR customer
-    {
+    // 프리셋에 해당하는 바우처를 개별 파일로 순차 다운로드
+    const files = [];
+    if(eo.comps.includes('saveback')){
       const wb = XLSX.read(new Uint8Array(bufs.saveback), { type:'array' });
       const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
       const cells = {};
-      Object.entries(rmap).forEach(([vc, v]) => {
-        const r = rows[vc]; if(!r) return;
-        cells['M'+r] = R(v.customer.jg); cells['N'+r] = R(v.customer.lr);
-      });
-      out.file(`AP Voucher_${sanitizeFilename(round.period_label)}_사용반환금.xlsx`,
-        await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }));
+      Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r) return; cells['M'+r] = R(v.customer.jg); cells['N'+r] = R(v.customer.lr); });
+      files.push({ name:`Engine Oil Package_사용반환금_${per}.xlsx`,
+        blob: await eo3vFillTemplate(bufs.saveback, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }) });
     }
-    // ② Retailer Support — (VME) 시트 M/N = VME jg/lr, (Castrol) 시트 M/N = Castrol jg/lr
-    {
+    if(eo.comps.includes('support')){
       const wb = XLSX.read(new Uint8Array(bufs.support), { type:'array' });
       const rV = eo3vMapInputRows(wb, 'AP_input reqeust (VME)');
       const rC = eo3vMapInputRows(wb, 'AP_input reqeust (Castrol)');
@@ -2995,58 +3064,43 @@ async function generateEngineOilVouchers(round, type){
         if(rV[vc]){ cV['M'+rV[vc]] = R(v.vme.jg); cV['N'+rV[vc]] = R(v.vme.lr); }
         if(rC[vc]){ cC['M'+rC[vc]] = R(v.castrol.jg); cC['N'+rC[vc]] = R(v.castrol.lr); }
       });
-      out.file(`AP Voucher_${sanitizeFilename(round.period_label)}_Retailer Support.xlsx`,
-        await eo3vFillTemplate(bufs.support, {
-          inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC }, coverDate: date }));
+      files.push({ name:`Engine Oil Package_Retailer Support_${per}.xlsx`,
+        blob: await eo3vFillTemplate(bufs.support, { inputFills: { 'AP_input reqeust (VME)': cV, 'AP_input reqeust (Castrol)': cC }, coverDate: date }) });
     }
-    // ③ Sales Incentive — AP_input reqeust : I = 지점 인센티브 금액 (M/N/I32은 수식)
-    {
+    if(eo.comps.includes('incentive')){
       const wb = XLSX.read(new Uint8Array(bufs.incentive), { type:'array' });
       const rows = eo3vMapInputRows(wb, 'AP_input reqeust');
       const cells = {};
-      Object.entries(rmap).forEach(([vc, v]) => {
-        const r = rows[vc]; if(!r || !v.incentive) return;
-        cells['I'+r] = R(v.incentive);
-      });
-      out.file(`AP without PO_${sanitizeFilename(round.period_label)}_Sales Incentive.xlsx`,
-        await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }));
+      Object.entries(rmap).forEach(([vc, v]) => { const r = rows[vc]; if(!r || !v.incentive) return; cells['I'+r] = R(v.incentive); });
+      files.push({ name:`Engine Oil Package_Sales Incentive_${per}.xlsx`,
+        blob: await eo3vFillTemplate(bufs.incentive, { inputFills: { 'AP_input reqeust': cells }, coverDate: date }) });
     }
 
-    // rawdata 통합 근거 (지점별 3종 요약)
-    const rawRows = [];
-    s.retailers.forEach(rt => rt.workshops.forEach(w => rawRows.push({
-      리테일러: rt.code, 지점: w.code,
-      'JG 고객': R(w.jg?.customer||0), 'LR 고객': R(w.lr?.customer||0),
-      'JG VME': R(w.jg?.vme||0), 'LR VME': R(w.lr?.vme||0),
-      'JG Castrol': R(w.jg?.castrol||0), 'LR Castrol': R(w.lr?.castrol||0),
-      '인센티브 판매': w.incentive?.sale||0, '인센티브 환불': w.incentive?.refund||0,
-      '인센티브 금액': R(w.incentive?.amount||0)
-    })));
-    const rwb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(rwb, XLSX.utils.json_to_sheet(rawRows), '3종 요약');
-    out.file(`rawdata_통합_${sanitizeFilename(round.period_label)}.xlsx`,
-      new Blob([XLSX.write(rwb, { bookType:'xlsx', type:'array' })]));
-
-    const blob = await out.generateAsync({ type:'blob' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `Engine Oil Package_바우처3종_${sanitizeFilename(round.period_label)}.zip`;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    for(const f of files){
+      const url = URL.createObjectURL(f.blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = f.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      await new Promise(r => setTimeout(r, 400)); // 연속 다운로드 차단 회피
+    }
 
     if(round.status !== 'VOUCHERED'){
       await sb.from('rounds').update({ status:'VOUCHERED' }).eq('id', round.id);
     }
-    await logAudit('EO3V_VOUCHER','ROUND',round.id,{label:`${type.name} · ${round.period_label}`});
+    await logAudit('EO3V_VOUCHER','ROUND',round.id,{label:`${type.name} · ${round.period_label}`, files: files.map(f=>f.name)});
+    alert(`바우처 ${files.length}개 다운로드 완료:\n- ` + files.map(f=>f.name).join('\n- ')
+      + '\n\n표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하세요.');
     await renderRoundDetail();
   }catch(err){
     console.error(err); alert('바우처 생성 실패: ' + (err.message || err));
-    if(btnBusy){ btnBusy.disabled = false; btnBusy.textContent = '바우처 3종 생성 (ZIP)'; }
+    if(btnBusy){ btnBusy.disabled = false; btnBusy.textContent = '바우처 생성'; }
   }
 }
 
 /* ---------- SYSTEM 유형: 원본 업로드 → 분류 결과 표시 ---------- */
 async function renderSystemSourceSection(round, type, claims){
-  if(type.source_config?.preset === 'ENGINE_OIL_3V'){
+  if(isEnginePreset(type)){
     return renderEngineOilSection(round, type, claims);
   }
   const host = document.getElementById('reviewSection');
@@ -4149,8 +4203,8 @@ async function renderRoundDetail(){
   if(type.source_config?.preset === 'ONE_DMS_AR'){ return renderOneDmsRoundDetail(round, type); }
   // AR(JLRK → 리테일러 청구)은 흐름이 반대라 별도 화면으로 분기
   if(type.direction === 'AR'){ return renderARRoundDetail(round, type); }
-  // Engine Oil 3종 바우처 (AP · 시스템 산출 · 리테일러 입력 없음)
-  if(type.source_config?.preset === 'ENGINE_OIL_3V'){ return renderEngineOilRoundDetail(round, type); }
+  // Engine Oil (AP · 시스템 산출 · 리테일러 입력 없음) — RS(월) / SI(분기)
+  if(isEnginePreset(type)){ return renderEngineOilRoundDetail(round, type); }
   document.getElementById('claimsTable').style.display = 'table'; // AR에서 돌아온 경우 복구
 
   document.getElementById('rd_title').textContent = `${type.name} · ${round.period_label}`;
@@ -6076,8 +6130,8 @@ async function loadRetailerClaims(){
       await renderOneDmsRetailerCard(listEl, round, items);
       continue;
     }
-    // Engine Oil 3종 (AP · 시스템 산출) — 확인 전용 카드
-    if(round.settlement_types?.source_config?.preset === 'ENGINE_OIL_3V'){
+    // Engine Oil (AP · 시스템 산출) — 확인 전용 카드
+    if(isEnginePreset(round.settlement_types)){
       await renderEngineOilRetailerCard(listEl, round, items);
       continue;
     }
