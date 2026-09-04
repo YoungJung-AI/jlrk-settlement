@@ -641,8 +641,8 @@
       <div class="field"><label>대표 사업자번호 (참고용)</label><input id="rt_biz_no" placeholder="숫자만"></div>
       <div class="field"><label>대표자명</label><input id="rt_ceo"></div>
     </div>
-    <div class="field"><label>알림 수신 이메일</label><input id="rt_email" type="email" placeholder="정산 안내를 받을 주소"></div>
-    <div class="hint">placeholder@example.com 인 동안은 메일이 발송되지 않습니다.</div>
+    <div class="field"><label>알림 수신 이메일</label><input id="rt_email" type="text" placeholder="담당자가 여러 명이면 쉼표로 구분 (a@x.com, b@x.com)"></div>
+    <div class="hint">쉼표로 구분해 여러 명 등록 가능. placeholder@example.com 인 동안은 메일이 발송되지 않습니다.</div>
     <div class="check-row" style="margin-top:14px;"><input type="checkbox" id="rt_active" checked><label for="rt_active">활성 (신규 회차 대상에 포함)</label></div>
     <div class="hint">비활성화해도 과거 회차 이력은 그대로 유지됩니다. 삭제 기능은 제공하지 않습니다.</div>
   </div>
@@ -1016,10 +1016,16 @@ async function getAdminEmails(){
 }
 
 // 특정 리테일러들의 수신 주소 조회
+// retailers.email 은 담당자가 여러 명이면 쉼표(또는 세미콜론)로 구분해 저장한다.
+// 예: 'a@aju.co.kr, b@aju.co.kr' → 두 명 모두에게 발송.
+function splitEmails(s){
+  return String(s || '').split(/[,;]+/).map(x => x.trim()).filter(Boolean);
+}
+
 async function getRetailerEmails(retailerIds){
   if(!retailerIds || retailerIds.length === 0) return [];
   const { data } = await sb.from('retailers').select('email').in('id', retailerIds);
-  return (data||[]).map(r => r.email).filter(Boolean);
+  return (data||[]).flatMap(r => splitEmails(r.email));
 }
 
 const fmtWon = (n) => Math.round(Number(n)||0).toLocaleString('ko-KR') + '원';
@@ -2130,8 +2136,9 @@ async function notifyEngineOilPublished(round, type, retailers){
   const ids = retailers.map(r => r.retailer_id);
   const { data: rts } = await sb.from('retailers').select('id, email, name').in('id', ids);
   for(const rt of (rts||[])){
-    if(!rt.email || rt.email === 'placeholder@example.com') continue;
-    await sendEmail(rt.email, `[JLRK 정산] ${type.name} · ${round.period_label} 정산내역 확인 요청`,
+    const to = splitEmails(rt.email).filter(e => !/placeholder@example\.com/i.test(e));
+    if(to.length === 0) continue;
+    await sendEmail(to, `[JLRK 정산] ${type.name} · ${round.period_label} 정산내역 확인 요청`,
       `<p>${rt.name} 담당자님,</p><p>${type.name} (${round.period_label}) 정산내역이 공지되었습니다. 포털에서 내역을 확인하시고 [정산 확정] 버튼을 눌러주세요.</p>`);
   }
 }
@@ -2937,9 +2944,9 @@ async function remindUnsubmitted(round, type, claims){
   for(const rid of ids){
     const rc = targets.find(c => c.retailer_id === rid);
     const rname = rc?.retailers?.code || rc?.retailers?.name || rid;
-    const email = rc?.retailers?.email;
-    if(!email || /placeholder@example\.com/i.test(email)){
-      skipList.push(`${rname} — 알림 이메일 미등록 (현재: ${email || '없음'})`);
+    const emails = splitEmails(rc?.retailers?.email).filter(e => !/placeholder@example\.com/i.test(e));
+    if(emails.length === 0){
+      skipList.push(`${rname} — 알림 이메일 미등록 (현재: ${rc?.retailers?.email || '없음'})`);
       continue;
     }
     const mine = targets.filter(c => c.retailer_id === rid);
@@ -2951,8 +2958,8 @@ async function remindUnsubmitted(round, type, claims){
         <tr><td style="padding:4px 12px 4px 0;color:#666;">제출 마감</td><td><b style="color:#c0392b;">${fmtDate(round.claim_due_at)}</b></td></tr>
       </table>
       <p style="margin-top:16px;">아직 청구서가 제출되지 않았습니다. 마감 전까지 포털에서 제출해주세요.</p>`);
-    const ok = await sendEmail(email, `[JLRK 정산] ${round.period_label} 청구서 미제출 안내`, html);
-    if(ok) okList.push(`${rname} → ${email}`);
+    const ok = await sendEmail(emails, `[JLRK 정산] ${round.period_label} 청구서 미제출 안내`, html);
+    if(ok) okList.push(`${rname} → ${emails.join(', ')}`);
     else skipList.push(`${rname} — 발송 실패 (브라우저 콘솔의 [알림] 로그 확인)`);
   }
   await logAudit('REMIND_SEND','ROUND',round.id,{label:`${okList.length}곳 독촉 발송`});

@@ -28,6 +28,7 @@
 | `021_form_template_storage_read.sql` | 리테일러가 청구서 양식(form-templates/) 다운로드하도록 Storage 읽기 허용 |
 | `022_rls_anon_lockdown.sql` | **보안 보완** — `settlement_types`·`rounds` 익명 SELECT 차단, `rounds` 는 참여 리테일러사만(`has_claim_in_round`). 2026-09-04 점검 대응 |
 | `023_settlement_types_accounting_lockdown.sql` | **보안 보완** — `settlement_types` 직접 SELECT 관리자 전용, 리테일러는 안전 컬럼만 담긴 `settlement_types_public` 뷰로. GL코드·배분비율·단가 등 회계 컬럼 차단. index.html 리테일러 3경로 동시 변경 |
+| `024_retailer_notify_emails.sql` | 리테일러 8개사 알림 수신 이메일(`retailers.email`) 등록. 담당자 2명(AJ·KCC)은 쉼표 구분. index.html `splitEmails()` 로 다중 수신 |
 
 ## ⚠️ 알아둘 것
 
