@@ -123,31 +123,26 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
   전부 실주소. AJ·KCC 는 담당자 2명이라 쉼표 구분 저장(`splitEmails()` 로 다중 발송).
   담당자 로그인 계정 10개도 `manage-user` 로 생성함(초기비번 강제변경). 기존 테스트계정
   `chtest@chunilauto.co.kr` / `youngjung.yu@gmail.com` 은 아직 active — 불필요 시 비활성화.
-- [ ] **Engine Oil Package 클레임 기반 정산 (`amount_mode='SYSTEM'`, 방향은 AP=지급) — 구현 진행 중.**
-  현재까지 된 것: `classifySourceRows`(index.html) + `settled_records`(migration 018) + `renderSystemSourceSection`
-  + 회차 확정 시 `settled_records` 기록 + 정산유형 설정폼에 dedup_keys·상태필터 필드. 4분류
-  (정산대상 / 기정산제외 / 상태제외 / 파일내중복)까지 동작.
-  **아직 안 된 것 3가지:**
-  1. **바우처 3종 분기 생성** — 현재 코드는 `voucher_lines[0]` 하나만 사용. 이 유형은 원본 1개(마스터 xlsx)에서
-     바우처가 3개 나옴. FY27 Q2 기준 실제 수치:
-     - **① 사용반환금**: 쿠폰(고객) = 총금액 × **80%**. GL `702030000`. VAT `V0:0%`. JG/LR 실적기준. GL 라인 2개.
-     - **② Retailer Support**: 쿠폰(KR) = 총금액 × **20%** = margin off + VME + Castrol.
-       GL 2개 = `700050800`(VME) + `1105020600`(Castrol). VAT `V0:0%`. 실적기준. GL 라인 **4개**(VME LR/JG + Castrol LR/JG).
-     - **③ Sales Incentive**: 최종판매수 × **10,000원**. GL `700050800`. VAT `V0:0%`. JG/LR **고정 90:10**. GL 라인 2개.
-     - 브랜드 판정: **차대번호 3번째 자리 = `L` → Land Rover, 아니면 Jaguar.**
-     - ⚠️ 사용자가 준 Retailer Support 원본에 JG/LR 코스트센터 라인이 뒤바뀐 회계 오류 있음(아래 "확인해야 할 것" 참고).
-  2. **리테일러 [정산 확정] 화면** — SYSTEM 유형은 리테일러가 입력 없이 관리자가 계산한 값 확인 후
-     "정산 확정" 버튼만 누르는 흐름(DRAFT: 관리자 원본 업로드·자동계산·검증 → PUBLISHED: 리테일러 확인 → CONFIRMED: 바우처 3종 생성).
-     현재 AR용 `renderARRoundDetail`과 유사하나 방향이 AP.
-  3. **금액 산출식 설정 UI** — 유형별로 80%/20%/×10,000 같은 식을 설정에 저장(작업하다 멈춘 지점).
-  - dedup_keys(Engine Oil): `["차대번호","쿠폰사용 참조번호","쿠폰번호"]` 3개 조합 — 참조번호 단독은 895건 중복이라 위험.
-    정규화 = 공백제거 + 대문자통일. 상태필터: `클레임상태 = 전송`인 건만, 미전송은 관리자만 확인(리테일러 통보 없음).
-  - "미정산 잔량" 기준: 월로 자르지 않고 `전송 AND dedup_hash ∉ settled_records` 조건 하나로 지연 건까지 자동 포함.
-  - 초기 적재: 과거 정산분 원본(같은 로우데이터 형식)을 정산유형 화면에서 업로드 → `settled_records`에 선등록. 범용 기능.
-- [ ] **`amount_mode='UNIT'`(수량×단가) 입력 UI 미구현** (예: One DMS License, 분기 1회, 단가 예 `109329.6667`).
-  DB 필드(`claims.quantity`, `settlement_types.unit_price`)만 있음. 지점별 수량 입력 → 단가 곱해 자동계산하는 화면 필요.
-  이 유형은 법인 대표지점 1곳에 금액 몰빵(`workshops`의 대표지점 플래그), VAT `A1:10%`, GL `605030101`, JG/LR 고정 10:90.
-  지금은 관리자가 수동 계산 후 금액만 입력하는 임시 방편.
+- [x] **Engine Oil Package 클레임 기반 정산 (`amount_mode='SYSTEM'` + `source_config.preset='ENGINE_OIL_3V'`, AP) — 1차 완료.**
+  구현됨: `parseEngineOilCoupon`/`parseEngineOilSales`(원본 2종 파싱) → `eo3vBuildBreakdown`(3종 계산) →
+  DRAFT→PUBLISHED→CONFIRMED→VOUCHERED 상태머신(`renderEngineOilRoundDetail`) → 리테일러 [정산 확정] 카드
+  (`renderEngineOilRetailerCard`) → 확정 시 `settled_records` 기록(`finalizeEngineOilRound`) →
+  바우처 3종 생성(`generateEngineOilVouchers`, JSZip XML 치환, JG/LR 라인 교정) + 템플릿 업로드 + rawdata ZIP.
+  산출 상수(사용반환금 비율 0.8 / Castrol 21,000 / 인센티브 10,000)는 정산유형 설정폼의
+  "시스템 산출 상수" 3필드 → `source_config`(키: `customer_rate`/`castrol_per`/`incentive_unit`),
+  비우면 `EO3V` 기본값(`eo3vParams()`).
+  - 브랜드 판정: 차대번호 3번째 자리 = `L` → Land Rover, 아니면 Jaguar.
+  - ① 사용반환금 GL `702030000` / ② Retailer Support GL `700050800`(VME)+`1105020600`(Castrol), GL 라인 4개 /
+    ③ Sales Incentive GL `700050800`, 표지 고정 90:10. VAT 전부 `V0:0%`.
+  - dedup_keys: `["차대번호","쿠폰사용 참조번호","쿠폰번호"]` 3개 조합. 정규화 = 공백제거+대문자. 상태필터 `클레임상태=전송`.
+  - ⚠️ 실제 원본파일로 E2E 검증은 사용자 몫 (샘플 데이터 `docs/engine-oil-test-scenario.md`).
+  - ⚠️ `EO3V.WS_MAP`(원본 지점명→workshop code 24개)은 아직 하드코딩. 브리티시(BA) 항목 포함 — 8개사 밖 딜러
+    안 나온다는 전제(사용자 확인). 필요 시 `source_config` 오버라이드로 뺄 것.
+- [x] **`amount_mode='UNIT'`(수량×단가) — 1차 완료.** `renderARRoundDetail`의 `isUnit` 경로:
+  리테일러별 수량 입력 → `수량 × unit_price` 자동계산(읽기전용) → `saveARClaim`이 `claims.quantity` 저장.
+  `charge_unit='PRIMARY'`면 `generateARVoucher`가 대표지점(`workshops.is_primary` + `customer_code`)에 금액 몰빵,
+  `brand_jg_ratio` 고정배분 + `vat_code` 적용. 설정폼에 `amount_mode=UNIT`/단가/계상단위 필드 존재.
+  - ⚠️ One DMS License 실데이터로 E2E 검증은 사용자 몫. (예 단가 `109329.6667`, VAT `A1:10%`, JG/LR 고정 10:90)
 - [ ] **검증 규칙 엔진** — 사용자가 엑셀로 눈으로 하던 검증을 포털 안에서 자동 실행. 설계만 끝남(`docs/history.md` 3805~3976).
   - 핵심 원칙: **AI는 규칙을 "만들 때만" 사용**, 실제 검증(라인 수천 건)은 결정론적 계산 로직으로 매번 실행.
   - 규칙 JSON 타입: `FORMULA`(계산식 재검증), `RANGE`, `DUPLICATE`(dedup keys), `DATE_RANGE`(기간 이탈),
