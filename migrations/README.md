@@ -27,6 +27,7 @@
 | `020_retailer_representative_bizno.sql` | 그룹 내 사업자번호 분기 리테일러(AJ·HS·WB) 대표지점 biz_no 시드 |
 | `021_form_template_storage_read.sql` | 리테일러가 청구서 양식(form-templates/) 다운로드하도록 Storage 읽기 허용 |
 | `022_rls_anon_lockdown.sql` | **보안 보완** — `settlement_types`·`rounds` 익명 SELECT 차단, `rounds` 는 참여 리테일러사만(`has_claim_in_round`). 2026-09-04 점검 대응 |
+| `023_settlement_types_accounting_lockdown.sql` | **보안 보완** — `settlement_types` 직접 SELECT 관리자 전용, 리테일러는 안전 컬럼만 담긴 `settlement_types_public` 뷰로. GL코드·배분비율·단가 등 회계 컬럼 차단. index.html 리테일러 3경로 동시 변경 |
 
 ## ⚠️ 알아둘 것
 
@@ -37,7 +38,7 @@
 
 ## 후속 보안 과제
 
-- `settlement_types` 는 `022` 이후에도 **로그인한 리테일러사 계정**에는 GL코드·코스트센터·
-  바우처 템플릿 경로 등 회계 설정이 그대로 보인다. 회계 전용 컬럼을 admin 전용 별도
-  테이블로 분리하는 것을 권장 (리테일러 UI 는 name/direction/claim_unit/form_template_path/
-  source_config 만 필요).
+- ~~`settlement_types` 회계 컬럼이 로그인 리테일러사에게 노출~~ → `023` 에서 해결
+  (직접 SELECT 관리자 전용 + `settlement_types_public` 뷰).
+- `rounds` 교차 열람은 `022` 로 정책상 차단됐으나, 실제 회차 데이터가 들어간 뒤
+  리테일러 계정으로 한 번 더 검증할 것 (점검 시점엔 테스트 회차가 비어 있었음).
