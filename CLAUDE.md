@@ -119,8 +119,10 @@ Phase 0 백엔드 → 1 정산유형관리 → 2 회차개설/제출 → 3 검�
   - `send-email` ACTIVE v1 — `GMAIL_USER`/`GMAIL_APP_PASSWORD` 시크릿 이미 설정돼 있음
   - `manage-user` ACTIVE v2 — `SERVICE_ROLE_KEY` 없으면 자동 주입되는 `SUPABASE_SERVICE_ROLE_KEY` 사용하도록 수정함
   - 프로젝트 ref: `yomuvsquaewmfxhfcgao`, `supabase/.temp/`는 `.gitignore` 처리됨
-- [ ] 리테일러 실제 이메일 주소 미입력 (전원 `placeholder@example.com` — 메일 발송 자동 스킵됨).
-  `update retailers set email='...' where code='AJ';` 식으로 반영. 8개사 실제 주소 필요.
+- [x] 리테일러 알림 이메일 등록 완료 (2026-09-04, migration 024). 8개사 `retailers.email`
+  전부 실주소. AJ·KCC 는 담당자 2명이라 쉼표 구분 저장(`splitEmails()` 로 다중 발송).
+  담당자 로그인 계정 10개도 `manage-user` 로 생성함(초기비번 강제변경). 기존 테스트계정
+  `chtest@chunilauto.co.kr` / `youngjung.yu@gmail.com` 은 아직 active — 불필요 시 비활성화.
 - [ ] **Engine Oil Package 클레임 기반 정산 (`amount_mode='SYSTEM'`, 방향은 AP=지급) — 구현 진행 중.**
   현재까지 된 것: `classifySourceRows`(index.html) + `settled_records`(migration 018) + `renderSystemSourceSection`
   + 회차 확정 시 `settled_records` 기록 + 정산유형 설정폼에 dedup_keys·상태필터 필드. 4분류
