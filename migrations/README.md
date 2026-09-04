@@ -23,9 +23,21 @@
 | `016_account_management.sql` | 계정 관리 (초기 비밀번호 변경 강제) |
 | `017_budget_management.sql` | 예산 구분(P&A Selling/VME/FMI/Accrual), 주기 확장(연간/상시) |
 | `018_dedup_settled_records.sql` | 범용 기정산 이력 (`settled_records`) — 시스템 산출 정산의 중복 방지 |
+| `019_ar_customer_master.sql` | AR 거래처 코드·사업자번호 보정 (customer_code) |
+| `020_retailer_representative_bizno.sql` | 그룹 내 사업자번호 분기 리테일러(AJ·HS·WB) 대표지점 biz_no 시드 |
+| `021_form_template_storage_read.sql` | 리테일러가 청구서 양식(form-templates/) 다운로드하도록 Storage 읽기 허용 |
+| `022_rls_anon_lockdown.sql` | **보안 보완** — `settlement_types`·`rounds` 익명 SELECT 차단, `rounds` 는 참여 리테일러사만(`has_claim_in_round`). 2026-09-04 점검 대응 |
 
 ## ⚠️ 알아둘 것
 
 - `001`과 `005`는 나중에 `006`으로 **설계가 뒤집힌 히스토리**임. 006이 최종 상태.
 - `007`, `008`은 스키마 변경이 없는 순수 진단 쿼리라 `diagnostics/`로 분리했음.
 - `diagnostics/check_migrations_status.sql`은 언제든 재실행해서 스키마 상태를 점검할 수 있는 상시 도구.
+- `diagnostics/diag_rls_anon_exposure.sql` — 익명/리테일러 역할의 테이블 노출 점검. `022` 적용 후 재실행해 검증.
+
+## 후속 보안 과제
+
+- `settlement_types` 는 `022` 이후에도 **로그인한 리테일러사 계정**에는 GL코드·코스트센터·
+  바우처 템플릿 경로 등 회계 설정이 그대로 보인다. 회계 전용 컬럼을 admin 전용 별도
+  테이블로 분리하는 것을 권장 (리테일러 UI 는 name/direction/claim_unit/form_template_path/
+  source_config 만 필요).
