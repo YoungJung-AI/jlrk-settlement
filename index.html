@@ -6,12 +6,13 @@
 <title>JLRK 정산 포털</title>
 <style>
   :root{
-    --bg:#14171c; --surface:#1a1e25; --surface2:#20252d; --surface3:#262c36;
-    --border:#2c3340; --border-soft:#232933;
-    --text:#e7eaee; --text-mid:#aab2c0; --text-dim:#6b7383;
-    --accent:#2f9e78;      /* AP 지원금 지급 / 정상 */
-    --accent-ar:#d99a3d;   /* AR 청구 / 주의 */
-    --danger:#e0616b;
+    color-scheme:light;
+    --bg:#f4f6f8; --surface:#ffffff; --surface2:#eef1f5; --surface3:#e1e6ec;
+    --border:#d2d8e0; --border-soft:#e6e9ef;
+    --text:#1b2430; --text-mid:#495468; --text-dim:#6b7686;
+    --accent:#1c8a61;      /* AP 지원금 지급 / 정상 */
+    --accent-ar:#b0740f;   /* AR 청구 / 주의 */
+    --danger:#cf2f3b;
     --radius:8px;
     font-family:"Aptos","Malgun Gothic","맑은 고딕",-apple-system,sans-serif;
   }
@@ -46,7 +47,7 @@
   .btn-block{ width:100%; }
   .btn-ghost{ background:transparent; color:var(--text-mid); border:1px solid var(--border); }
   .btn-ghost:hover{ color:var(--text); border-color:var(--text-dim); }
-  .btn-danger{ background:transparent; color:var(--danger); border:1px solid rgba(224,97,107,.4); }
+  .btn-danger{ background:transparent; color:var(--danger); border:1px solid rgba(207,47,59,.35); }
   .btn-sm{ padding:6px 12px; font-size:12.5px; }
   #loginError{ color:var(--danger); font-size:12.5px; margin-top:12px; min-height:16px; }
 
@@ -79,11 +80,11 @@
   tbody tr:last-child td{ border-bottom:none; }
   tbody tr.clickable:hover{ background:var(--surface2); cursor:pointer; }
   .badge{ display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; white-space:nowrap; }
-  .badge-ap{ background:rgba(47,158,120,.15); color:var(--accent); }
-  .badge-ar{ background:rgba(217,154,61,.15); color:var(--accent-ar); }
+  .badge-ap{ background:rgba(28,138,97,.13); color:var(--accent); }
+  .badge-ar{ background:rgba(176,116,15,.13); color:var(--accent-ar); }
   .badge-off{ background:var(--surface3); color:var(--text-dim); }
-  .badge-warn{ background:rgba(217,154,61,.15); color:var(--accent-ar); }
-  .badge-danger{ background:rgba(224,97,107,.15); color:var(--danger); }
+  .badge-warn{ background:rgba(176,116,15,.13); color:var(--accent-ar); }
+  .badge-danger{ background:rgba(207,47,59,.11); color:var(--danger); }
   .muted{ color:var(--text-dim); }
   .empty-state{ text-align:center; padding:60px 20px; color:var(--text-dim); font-size:13px; border:1px dashed var(--border); border-radius:var(--radius); }
 
@@ -122,7 +123,7 @@
   .hint{ font-size:11.5px; color:var(--text-dim); margin-top:4px; }
   .chip-list{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
   .chip{ font-size:11.5px; padding:4px 9px; border-radius:20px; background:var(--surface3); color:var(--text-mid); cursor:pointer; border:1px solid transparent; user-select:none; }
-  .chip.selected{ background:rgba(47,158,120,.16); color:var(--accent); border-color:rgba(47,158,120,.4); }
+  .chip.selected{ background:rgba(28,138,97,.14); color:var(--accent); border-color:rgba(28,138,97,.4); }
 
   /* ---------- Retailer view ---------- */
   .claim-card{ background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:16px 18px; margin-bottom:12px; }
@@ -942,7 +943,7 @@ function renderManualMapping(card, unmatchedItems){
 
   const box = document.createElement('div');
   box.className = 'manual-map-box';
-  box.style.cssText = 'margin:12px 0; padding:12px 14px; border:1px solid rgba(217,154,61,.4); border-radius:6px; background:rgba(217,154,61,.06);';
+  box.style.cssText = 'margin:12px 0; padding:12px 14px; border:1px solid rgba(176,116,15,.4); border-radius:6px; background:rgba(176,116,15,.08);';
   box.innerHTML = `<div style="font-size:12.5px; font-weight:600; margin-bottom:8px; color:var(--accent-ar);">
       매칭되지 않은 지점 ${unmatchedItems.length}개 — 어느 지점인지 지정해주세요</div>`;
   const rowsHost = document.createElement('div');
