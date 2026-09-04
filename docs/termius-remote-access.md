@@ -3,13 +3,16 @@
 > 목표: 밖에서(폰·노트북 Termius) `영중의 Mac mini` 에 SSH로 붙고,
 > 접속이 끊겨도 Claude Code 세션이 살아있게 한다.
 >
-> 이 맥미니 현재 상태 (2026-09-04 점검):
+> 진행 상태 (2026-09-04):
 > - 사용자명: `youngjung`  ·  LocalHostName: `yeongjung-ui-Macmini`
 > - LAN IP: `192.168.0.33`(유선 en0) / `192.168.0.54`(Wi-Fi en1)
-> - SSH 서버: **꺼짐** → 켜야 함
-> - Tailscale.app: 설치됨 but **중지 상태** → 로그인·연결 필요
-> - `screen`: 내장돼 있음 (`/usr/bin/screen`) → 세션 유지에 사용. brew 불필요
-> - `~/.ssh/authorized_keys`: 빈 파일로 생성해둠 (권한 700/600)
+> - Phase 1 ✅ SSH 서버 On (시스템 설정 토글로 켬 — 터미널 명령은 Full Disk Access 필요해서 실패)
+> - Phase 2 ✅ pmset: sleep 0 / disksleep 0 / womp 1 / autorestart 1 / powernap 1
+> - Phase 3 ✅ Tailscale 연결됨. **맥미니 Tailscale IP = `100.112.86.101`** (tailnet: youngjung.yu@)
+>   ('Launch Tailscale at login' 체크 권장. 옛 기기 ipad153=100.77.149.52 오프라인)
+> - `screen`: 내장 (`/usr/bin/screen`) → 세션 유지에 사용. brew 불필요
+> - Phase 4 ✅ Termius Ed25519 공개키 `~/.ssh/authorized_keys` 등록 (fp SHA256:kIchCicfRK6cszRAZ+jcMxwK1ZFFqpG29iYwBZ0P2xA)
+>   ⚠️ 이 키쌍은 개인키가 채팅에 한 번 노출됨 → 여유될 때 Termius에서 재생성 후 교체 권장 (Tailscale-only라 급하진 않음)
 
 ---
 
