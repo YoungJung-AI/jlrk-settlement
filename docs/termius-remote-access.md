@@ -143,6 +143,11 @@ screen -DR main
 
 ---
 
+> 진행: Phase 5 ✅ `~/.zshrc` 에 `alias work='screen -DR main'` / `alias jlrk=...` 추가됨.
+> Phase 6 ✅ Termius 호스트 `MacMini` = `100.112.86.101:22` user `youngjung` + 키.
+> **접속 성공 확인** (맥미니에서 `100.64.236.35` tailnet IP로 SSH ESTABLISHED).
+> 남은 것: Startup snippet `screen -DR main` 설정(선택) + 세션유지 테스트 + 키 교체.
+
 ## Phase 7 — 테스트 & 일상 사용
 
 1. Termius에서 Mac mini 호스트 탭 → 접속되면 `screen` 세션(빈 셸 또는 이전 화면) 뜸
