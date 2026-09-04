@@ -2667,8 +2667,12 @@ async function generateOneDmsVoucher(round, type, claims){
     }
 
     setProgress('금액을 배치하는 중...');
+    // 리테일러별 대표지점 행에 공급가액(I열)만 입력한다.
+    // VAT(J), JG/LR 배분(M/N), 표지 합계는 템플릿 수식(=I*10% / =I*90% 등)이 재계산한다
+    // (buildVoucherFromTemplate 이 fullCalcOnLoad 강제).
     const inputCells = {};
     const unmatched = [];
+    const placed = [];
     for(const c of (claims||[])){
       const amount = Number(c.approved_amount||0);
       if(!amount) continue;
@@ -2677,12 +2681,8 @@ async function generateOneDmsVoucher(round, type, claims){
       if(!rep){ unmatched.push(code || c.retailer_id); continue; }
       const rowNum = custRowMap.get(String(rep.customer_code).trim());
       if(!rowNum){ unmatched.push(`${code}(${rep.customer_code})`); continue; }
-      const jg = c.jg_amount != null ? Number(c.jg_amount) : Math.round(amount * P.JG_RATIO);
-      const lr = c.lr_amount != null ? Number(c.lr_amount) : amount - jg;
       inputCells[`I${rowNum}`] = amount;
-      inputCells[`J${rowNum}`] = Math.round(amount * P.VAT_RATE);
-      inputCells[`M${rowNum}`] = jg;
-      inputCells[`N${rowNum}`] = lr;
+      placed.push(`${code} ${fmtWon(amount)}`);
     }
     if(Object.keys(inputCells).length === 0) throw new Error('배치할 금액이 없습니다. 템플릿 D열 customer code 와 대표지점 코드가 맞는지 확인하세요.');
 
@@ -2707,7 +2707,7 @@ async function generateOneDmsVoucher(round, type, claims){
     await sb.from('vouchers').insert({ round_id: round.id, retailer_id: null, generated_by: user?.id || null });
     if(round.status !== 'VOUCHERED') await sb.from('rounds').update({ status:'VOUCHERED' }).eq('id', round.id);
     await logAudit('AR_VOUCHER_GENERATE','ROUND',round.id,{label:round.period_label});
-    setProgress(`완료 — ${fname} 다운로드됨.`
+    setProgress(`완료 — ${fname} 다운로드됨.<br>배치: ${placed.join(' · ')}`
       + (unmatched.length ? `<br><span style="color:var(--accent-ar);">미배치: ${unmatched.join(', ')}</span>` : '')
       + '<br>표지 PDF는 엑셀에서 [파일 > 다른 이름으로 저장 > PDF]로 저장하세요.');
   }catch(e){
