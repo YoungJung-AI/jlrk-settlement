@@ -506,7 +506,21 @@
       <div class="field"><label>JG 코스트센터</label><input id="f_voucher_cc_jg" placeholder="예: KR02JSU300"></div>
     </div>
 
-    <div class="section-label" id="ar_section_label">AR 정산 구조 (방향이 AR일 때만 사용)</div>
+    <div class="section-label">청구금액 산출</div>
+    <div class="row2">
+      <div class="field"><label>청구금액 산출 방식</label>
+        <select id="f_amount_mode">
+          <option value="UPLOAD">원천 엑셀 업로드 → 자동 집계</option>
+          <option value="SYSTEM">시스템 산출 (리테일러 입력 없음)</option>
+          <option value="UNIT">수량 × 단가 계산</option>
+          <option value="MANUAL">관리자 직접 입력</option>
+        </select>
+      </div>
+      <div class="field" id="grp_unit_price"><label>단가 (수량×단가 방식일 때)</label><input id="f_unit_price" type="number" step="0.0001" placeholder="예: 109329.6667"></div>
+    </div>
+
+    <div id="grp_ar_struct">
+    <div class="section-label" id="ar_section_label">AR 정산 구조 (방향이 AR일 때)</div>
     <div class="row2">
       <div class="field"><label>부가세 코드</label>
         <select id="f_vat_code">
@@ -530,31 +544,27 @@
       </div>
       <div class="field"><label>JG 고정비율 (0.10 = 10%)</label><input id="f_brand_jg_ratio" type="number" step="0.01" placeholder="0.10"></div>
     </div>
-    <div class="row2">
-      <div class="field"><label>청구금액 산출 방식</label>
-        <select id="f_amount_mode">
-          <option value="UPLOAD">원천 엑셀 업로드 → 자동 집계</option>
-          <option value="SYSTEM">시스템 산출 (리테일러 입력 없음)</option>
-          <option value="UNIT">수량 × 단가 계산</option>
-          <option value="MANUAL">관리자 직접 입력</option>
-        </select>
-      </div>
-      <div class="field"><label>단가 (수량×단가 방식일 때)</label><input id="f_unit_price" type="number" step="0.0001" placeholder="예: 109329.6667"></div>
     </div>
+
+    <div id="grp_source_config">
     <div class="field"><label>원천 엑셀 파싱 규칙 (JSON)</label>
       <textarea id="f_source_config" rows="3" placeholder='{"sheet":"FY27 Q1 Jun","workshop_col":"Workshop","amount_col":"Total","jg_col":"Jaguar","lr_col":"Landrover"}'></textarea>
     </div>
-    <div class="hint">업로드 방식일 때, 원천 엑셀에서 어느 시트·어느 컬럼을 읽을지 지정합니다. 컬럼명은 헤더 텍스트 일부만 적어도 매칭됩니다.</div>
+    <div class="hint">업로드/시스템 산출 방식일 때, 원천 엑셀에서 어느 시트·어느 컬럼을 읽을지 지정합니다. 프리셋(<code>ENGINE_OIL_3V</code> · <code>ONE_DMS_AR</code>)은 개발된 로직이 적용됩니다.</div>
+    </div>
 
+    <div id="grp_eo_consts">
     <div class="section-label">시스템 산출 상수 (Engine Oil 3종 전용)</div>
-    <div class="hint">산출방식 = 시스템 산출 이면서 원천 파싱 규칙에 <code>"preset":"ENGINE_OIL_3V"</code> 일 때 사용됩니다. 비우면 기본값(80% / 21,000 / 10,000).</div>
+    <div class="hint">원천 파싱 규칙에 <code>"preset":"ENGINE_OIL_3V"</code> 일 때 사용. 비우면 기본값(80% / 21,000 / 10,000).</div>
     <div class="row3">
       <div class="field"><label>사용반환금 비율 (0.8 = 80%)</label><input id="f_eo_customer_rate" type="number" step="0.01" placeholder="0.8"></div>
       <div class="field"><label>쿠폰 1건당 Castrol</label><input id="f_eo_castrol_per" type="number" step="1" placeholder="21000"></div>
       <div class="field"><label>최종판매 1건당 인센티브</label><input id="f_eo_incentive_unit" type="number" step="1" placeholder="10000"></div>
     </div>
+    </div>
 
-    <div class="section-label">중복 정산 방지</div>
+    <div id="grp_dedup">
+    <div class="section-label">중복 정산 방지 (시스템 산출 방식 전용)</div>
     <div class="field"><label>중복 판정 키 (쉼표 구분)</label>
       <input id="f_dedup_keys" placeholder="예: 차대번호, 쿠폰사용 참조번호, 쿠폰번호">
     </div>
@@ -567,6 +577,7 @@
       <div class="field"><label>정산 대상 상태값 (쉼표 구분)</label><input id="f_status_allowed" placeholder="예: 전송"></div>
     </div>
     <div class="hint">이 값이 아닌 건은 정산 대상에서 제외되고, 관리자에게만 목록으로 표시됩니다. 비워두면 상태 필터를 쓰지 않습니다.</div>
+    </div>
 
     <div class="hint">GL코드·코스트센터·설명은 이 유형에서 고정값으로 관리됩니다. 바우처 생성 시 회차 기간이 설명 앞에 자동으로 붙고(예: "FY27 Q1 Recall Campaign Upselling Program"), 계산서 날짜도 생성 시점에 자동으로 채워집니다.</div>
 
@@ -1420,6 +1431,24 @@ async function loadTypes(){
   });
 }
 
+// 정산유형 폼: 방향·산출방식·프리셋에 따라 관련 없는 섹션을 숨긴다
+function syncTypeFormFields(){
+  const dir = document.getElementById('f_direction').value;
+  const mode = document.getElementById('f_amount_mode').value;
+  const raw = document.getElementById('f_source_config').value || '';
+  const isEngineOil = /ENGINE_OIL_3V/.test(raw);
+  const show = (id, on) => { const el = document.getElementById(id); if(el) el.style.display = on ? '' : 'none'; };
+  show('grp_ar_struct',     dir === 'AR');
+  show('grp_unit_price',    mode === 'UNIT');
+  show('grp_source_config', mode === 'UPLOAD' || mode === 'SYSTEM');
+  show('grp_eo_consts',     mode === 'SYSTEM' && isEngineOil);
+  show('grp_dedup',         mode === 'SYSTEM');
+}
+['f_direction','f_amount_mode','f_source_config'].forEach(id => {
+  const el = document.getElementById(id);
+  if(el) el.addEventListener(id === 'f_source_config' ? 'input' : 'change', syncTypeFormFields);
+});
+
 function openTypePanel(t){
   editingTypeId = t ? t.id : null;
   document.getElementById('typePanelTitle').textContent = t ? '정산 유형 수정' : '새 정산 유형';
@@ -1471,6 +1500,7 @@ function openTypePanel(t){
   document.getElementById('f_is_active').checked = t ? !!t.is_active : true;
   selectedRetailerIds = new Set(t?.target_retailers || []);
   document.querySelectorAll('#retailerChips .chip').forEach(chip => chip.classList.toggle('selected', selectedRetailerIds.has(chip.dataset.id)));
+  syncTypeFormFields();
   openPanel('typePanel');
 }
 
